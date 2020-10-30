@@ -1,0 +1,12 @@
+[Unit]
+Description=PLDM Sensor
+StopWhenUnneeded=false
+After=xyz.openbmc_project.mctpd@.service
+
+[Service]
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/pldmsensor
+
+[Install]
+WantedBy=multi-user.target
