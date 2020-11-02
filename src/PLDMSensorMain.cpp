@@ -647,7 +647,7 @@ void check_pldm_device_status(void)
 
 int main(void)
 {
-    pldm_state = SET_TID;
+    last_pldm_state = pldm_state = SET_TID;
 
     systemBus->request_name("xyz.openbmc_project.PLDMSensor");//Create Service
     sdbusplus::asio::object_server objectServer(systemBus);
@@ -724,6 +724,7 @@ int main(void)
                         method.append(dstEid, msgTag, true, requestMsg);
                         systemBus->call_noreply(method);
                         instanceIDmap.insert(pair<uint8_t, string>(0, "root"));
+                        last_pldm_state = GET_TID;
                         return;
                     }
                     else if(pldm_state == GET_TID)
@@ -755,6 +756,7 @@ int main(void)
                         method.append(dstEid, msgTag, true, requestMsg);
                         systemBus->call_noreply(method);
                         instanceIDmap.insert(pair<uint8_t, string>(0, "root"));
+                        last_pldm_state = GET_TYPE;
                         return;
                     }
                     else if (pldm_state == GET_TYPE)
