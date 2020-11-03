@@ -29,7 +29,7 @@
 int parseSensorReadingResponseMsg(pldm_msg* responsePtr, size_t payloadLength, double *PRESENT_val)
 {
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
-    if ( resphdr->command == 0x11)
+    if ( resphdr->command == PLDM_GET_SENSOR_READING)
     {
         // Response Header:3bytes
         //    Byte1:Rq(7),D(6),Instance_ID(0-4)
@@ -93,7 +93,7 @@ int parseSensorReadingResponseMsg(pldm_msg* responsePtr, size_t payloadLength, d
 
     }
     else
-        fprintf(stderr,"Response command is not 0x11(%x)\n",resphdr->command);
+        fprintf(stderr,"Response command is not PLDM_GET_SENSOR_READING(%02x),(%x)\n", PLDM_GET_SENSOR_READING, resphdr->command);
 
     return -1;
 }
@@ -164,7 +164,7 @@ std::pair<int, std::vector<uint8_t>> PLDMSensor::createSetSensorThresholdRequest
 
     std::vector<uint8_t> requestMsg(
         sizeof(pldm_msg_hdr) + 3 + 6*size);
-    
+
     auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
 
     auto rc = encode_set_sensor_threshold_req(instance_id, sensorId, sensorDataSize, thresholds, request);
@@ -176,7 +176,7 @@ int parseGetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength, in
 {
     uint8_t cc = 0;
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
-    if(resphdr->command == 0x12)
+    if(resphdr->command == PLDM_GET_SENSOR_THRESHOLD)
     {
         uint8_t sensorDataSize{};
         uint8_t sensorValue[24] = {};
@@ -219,7 +219,7 @@ int parseGetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength, in
         }
     }
     else
-        fprintf(stderr,"GetThreshold Response command should be 0x12(%x)\n",resphdr->command);
+        fprintf(stderr,"GetThreshold Response command should be PLDM_GET_SENSOR_THRESHOLD(%02X), (%x)\n", PLDM_GET_SENSOR_THRESHOLD, resphdr->command);
     return -1;
 }
 
@@ -233,12 +233,125 @@ std::pair<int, std::vector<uint8_t>> PLDMSensor::createGetSensorThresholdRequest
     return {rc, requestMsg};
 }
 
+//Hystersis
+int parseSetSensorHysteresisResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
+{
+    uint8_t cc = 0;
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+
+    if(resphdr->command == PLDM_SET_SENSOR_HYSTERESIS)
+    {
+        auto rc = decode_set_sensor_hysteresis_resp(responsePtr, payloadLength, &cc);
+
+        if (rc != PLDM_SUCCESS || cc != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: (SetThresholdResponse)"
+                    << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
+            return -1;
+        }
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_SET_SENSOR_HYSTERESIS(%02X), what we get is (%02x)\n",PLDM_SET_SENSOR_HYSTERESIS, resphdr->command);
+
+    return -1;
+}
+
+std::pair<int, std::vector<uint8_t>> PLDMSensor::createSetSensorHysteresisRequestMsg(uint16_t sensorId, uint8_t sensorDataSize, uint32_t Hysteresis_val)
+{
+    uint8_t Hysteresis[4] = {};
+    int size = 0;
+    if (sensorDataSize == PLDM_EFFECTER_DATA_SIZE_UINT8 ||
+        sensorDataSize == PLDM_EFFECTER_DATA_SIZE_SINT8) {
+        size = 1;
+
+        Hysteresis[0] = Hysteresis_val;
+    }
+    else if (sensorDataSize == PLDM_EFFECTER_DATA_SIZE_UINT16 ||
+        sensorDataSize == PLDM_EFFECTER_DATA_SIZE_SINT16)
+    {
+        size = 2;
+        Hysteresis_val = htole16(Hysteresis_val);
+        memcpy(&Hysteresis[0], &Hysteresis_val, 2);
+    }
+    else if (sensorDataSize == PLDM_EFFECTER_DATA_SIZE_UINT32 ||
+        sensorDataSize == PLDM_EFFECTER_DATA_SIZE_SINT32)
+    {
+        size = 4;
+        Hysteresis_val = htole32(Hysteresis_val);
+        memcpy(&Hysteresis[0], &Hysteresis_val, 4);
+    }
+
+    std::vector<uint8_t> requestMsg(
+        sizeof(pldm_msg_hdr) + 3 + size);
+
+    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+
+    auto rc = encode_set_sensor_hysteresis_req(instance_id, sensorId, sensorDataSize, Hysteresis, request);
+
+    return {rc, requestMsg};
+}
+
+int parseGetSensorHysteresisResponseMsg(pldm_msg* responsePtr, size_t payloadLength, int *hysteresis_Val )
+{
+    uint8_t cc = 0;
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+    if(resphdr->command == PLDM_GET_SENSOR_HYSTERESIS)
+    {
+        uint8_t sensorDataSize{};
+        uint8_t sensorValue[4] = {};
+        auto rc = decode_get_sensor_hysteresis_resp(responsePtr, payloadLength, &cc, &sensorDataSize,
+            reinterpret_cast<uint8_t*>(&sensorValue));
+
+        if (rc != PLDM_SUCCESS || cc != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: "
+                    << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
+            return -1;
+        }
+
+        if (sensorDataSize == PLDM_EFFECTER_DATA_SIZE_UINT8 ||
+            sensorDataSize == PLDM_EFFECTER_DATA_SIZE_SINT8)
+        {
+
+            *hysteresis_Val = sensorValue[0];
+        }
+        else if (sensorDataSize == PLDM_EFFECTER_DATA_SIZE_UINT16 ||
+            sensorDataSize == PLDM_EFFECTER_DATA_SIZE_SINT16)
+        {
+            uint16_t val16 = 0;
+            memcpy(&val16, &sensorValue[0], 2);
+            *hysteresis_Val = le16toh(val16);
+        }
+        else if (sensorDataSize == PLDM_EFFECTER_DATA_SIZE_UINT32 ||
+            sensorDataSize == PLDM_EFFECTER_DATA_SIZE_SINT32)
+        {
+             uint32_t val32 = 0;
+            memcpy(&val32, &sensorValue[0], 4);
+            *hysteresis_Val = le32toh(val32);
+        }
+    }
+    else
+        fprintf(stderr,"GetHysteresis Response command should be PLDM_GET_SENSOR_HYSTERESIS, but we got (%x)\n", PLDM_GET_SENSOR_HYSTERESIS, resphdr->command);
+    return -1;
+}
+
+std::pair<int, std::vector<uint8_t>> PLDMSensor::createGetSensorHysteresisRequestMsg(uint16_t sensorId)
+{
+    std::vector<uint8_t> requestMsg(
+        sizeof(pldm_msg_hdr) + 2);
+
+    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+    auto rc = encode_get_sensor_hysteresis_req(instance_id, sensorId, request);
+    return {rc, requestMsg};
+}
+
 int parseSetTidResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
 {
     uint8_t cc = 0;
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
 
-    if(resphdr->command == 0x1)
+    if(resphdr->command == PLDM_SETTID)
     {
         auto rc = decode_set_tid_resp(responsePtr, payloadLength, &cc);
 
@@ -248,11 +361,10 @@ int parseSetTidResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
                     << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
             return -1;
         }
-        fprintf(stderr,"SetTID successfully\n");
         return 0;
     }
     else
-        fprintf(stderr,"Response command is not 0x1(%x)\n",resphdr->command);
+        fprintf(stderr,"Response command is not PLDM_SETTID(%02X), is (%x)\n", PLDM_SETTID, resphdr->command);
 
     return -1;
 }
@@ -286,7 +398,7 @@ int parseSetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
     uint8_t cc = 0;
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
 
-    if(resphdr->command == 0x13)
+    if(resphdr->command == PLDM_SET_SENSOR_THRESHOLD)
     {
         auto rc = decode_set_sensor_threshold_resp(responsePtr, payloadLength, &cc);
 
@@ -296,11 +408,10 @@ int parseSetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
                     << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
             return -1;
         }
-        fprintf(stderr,"SetThreshold Response successfully\n");
         return 0;
     }
     else
-        fprintf(stderr,"Response command is not 0x13(%02x)\n",resphdr->command);
+        fprintf(stderr,"Response command is not PLDM_SET_SENSOR_THRESHOLD(%02X), is (%02x)\n", PLDM_SET_SENSOR_THRESHOLD, resphdr->command);
 
     return -1;
 }
@@ -310,7 +421,7 @@ int parseSetNumericSensorEnableResponseMsg(pldm_msg* responsePtr, size_t payload
     uint8_t cc = 0;
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
 
-    if(resphdr->command == 0x10)
+    if(resphdr->command == PLDM_SET_NUMERIC_SENSOR_ENABLE)
     {
         auto rc = decode_set_numeric_sensor_enable_resp(responsePtr, payloadLength, &cc);
 
@@ -320,11 +431,10 @@ int parseSetNumericSensorEnableResponseMsg(pldm_msg* responsePtr, size_t payload
                     << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
             return -1;
         }
-        fprintf(stderr,"set_numeric_sensor_enable successfully\n");
         return 0;
     }
     else
-        fprintf(stderr,"Response command is not 0x10(%02x)\n",resphdr->command);
+        fprintf(stderr,"Response command is not PLDM_SET_NUMERIC_SENSOR_ENABLE(%02X), is (%02x)\n", PLDM_SET_NUMERIC_SENSOR_ENABLE, resphdr->command);
 
     return -1;
 }
@@ -334,7 +444,7 @@ int parseGetTidResponseMsg(pldm_msg* responsePtr, size_t payloadLength, uint8_t 
     uint8_t cc = 0;
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
 
-    if(resphdr->command == 0x2)
+    if(resphdr->command == PLDM_GETTID)
     {
         auto rc = decode_get_tid_resp(responsePtr, payloadLength, &cc, tid);
 
@@ -344,11 +454,10 @@ int parseGetTidResponseMsg(pldm_msg* responsePtr, size_t payloadLength, uint8_t 
                     << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
             return -1;
         }
-        fprintf(stderr,"GetTID successfully\n");
         return 0;
     }
     else
-        fprintf(stderr,"resphdr command is not 0x2(%x)\n",resphdr->command);
+        fprintf(stderr,"resphdr command is not PLDM_GETTID(%02X), is (%x)\n", PLDM_GETTID, resphdr->command);
     return -1;
 }
 
@@ -405,7 +514,7 @@ int parseGetTypeResponseMsg(pldm_msg* responsePtr, size_t payloadLength, pldm_su
                       << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
             return -1;
         }
-        
+
         printPldmTypes(types);
         return matchPldmTypes(types, pldmType);
     }

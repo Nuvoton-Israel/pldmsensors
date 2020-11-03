@@ -47,6 +47,7 @@ enum pldm_numeric_sensor_commands{
 	GetSensorHysteresis = 0x6,
 	SetSensorHysteresis = 0x7,
 	InitNumericSensor = 0x8
+
 };
 
 struct PLDMSensor : public Sensor
@@ -56,7 +57,7 @@ struct PLDMSensor : public Sensor
                   const std::string& sensorConfiguration,
                   sdbusplus::asio::object_server& objectServer,
                   std::vector<thresholds::Threshold>&& thresholds,
-                  uint16_t sensorId, const std::string& sensorTypeName, 
+                  uint16_t sensorId, const std::string& sensorTypeName,
                   const std::string& sensorUnit, double factor, int sensorScale,
                   const std::string& objectType);
     ~PLDMSensor();
@@ -69,6 +70,8 @@ struct PLDMSensor : public Sensor
     std::pair<int, std::vector<uint8_t>> createSetNumericSensorEnableRequestMsg(uint16_t sensorId, uint8_t sensor_operational_state, uint8_t sensor_event_message_enable);
     std::pair<int, std::vector<uint8_t>> createSetSensorThresholdRequestMsg(uint16_t sensorId, uint8_t sensorDataSize, uint32_t THRESHOLDs_val[]);
     std::pair<int, std::vector<uint8_t>> createGetSensorThresholdRequestMsg(uint16_t sensorId);
+    std::pair<int, std::vector<uint8_t>> createSetSensorHysteresisRequestMsg(uint16_t sensorId, uint8_t sensorDataSize, uint32_t Hysteresis_val);
+    std::pair<int, std::vector<uint8_t>> createGetSensorHysteresisRequestMsg(uint16_t sensorId);
     void check_init_status(void);
 
     uint8_t instance_id;
@@ -79,6 +82,7 @@ struct PLDMSensor : public Sensor
     uint8_t sensorDataSize;
     uint32_t THRESHOLDs_val_sensor[6];
     bool8_t rearmEventState;
+    uint32_t hysteresis;
 
     volatile pldm_numeric_sensor_commands cmd;
     volatile pldm_numeric_sensor_commands last_cmd;
@@ -122,8 +126,11 @@ void Logger(bool pldmverbose, const char* msg, const T& data)
     }
 }
 
+int parseGetSensorHysteresisResponseMsg(pldm_msg* responsePtr, size_t payloadLength, int *hysteresis_Val );
+int parseSetSensorHysteresisResponseMsg(pldm_msg* responsePtr, size_t payloadLength);
+
 int parseGetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength, int THRESHOLDs_val[] );
-int parseSetThresholdResponseMsg(struct pldm_msg* responsePtr, size_t payloadLength);
+int parseSetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength);
 
 int parseGetTidResponseMsg(pldm_msg* responsePtr, size_t payloadLength, uint8_t *tid);
 int parseSetTidResponseMsg(pldm_msg* responsePtr, size_t payloadLength);

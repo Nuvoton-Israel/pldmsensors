@@ -149,23 +149,21 @@ void PLDMSensor::check_init_status(void)
 {
     waitTimer.expires_from_now(boost::posix_time::seconds(5));
     waitTimer.async_wait([&](const boost::system::error_code& ec) {
-        fprintf(stderr,"check_init_status() for (%s) time's up\n",sensorName.c_str());
+        fprintf(stderr,"%s: check_init_status() time's up: cmd(%d),last_cmd(%d)\n",sensorName.c_str(), cmd, last_cmd);
         if (ec == boost::asio::error::operation_aborted)
         {
-            std::cerr << "we're being cancelled in check_init_status\n";
+            fprintf(stderr,"%s: we're being cancelled in check_init_status\n",sensorName.c_str());
             return; // we're being cancelled
         }
         // read timer error
         else if (ec)
         {
-            std::cerr << "timer error check_init_status\n";
+            fprintf(stderr,"%s: timer error check_init_status\n",sensorName.c_str());
             return;
         }
 
         if( cmd == last_cmd )
         {
-            fprintf(stderr,"check_init_status() for (%s) cmd(%d) == last_cmd(%d)\n",sensorName.c_str(),cmd,last_cmd);
-
             //remove iter in InstanceID map
             map<uint8_t, string>::iterator iter;
             iter = instanceIDmap.find(instance_id);
@@ -176,14 +174,19 @@ void PLDMSensor::check_init_status(void)
                 {
                     instanceIDmap.erase(iter);
                     if(debugP)
-                        fprintf(stderr,"instanceID %d in map is belonging to %s, so erase it\n",instance_id,sensorName.c_str());
+                        fprintf(stderr,"%s: find instanceID %d in map, so erase it\n",sensorName.c_str(),instance_id);
                 }
             }
             init();
         }
-        if( cmd < GetSensorReading )
+        if( cmd != GetSensorReading )
+        {
+            fprintf(stderr,"%s: cmd(%d) is still not GetSensorReading, so keep check init status\n",sensorName.c_str(),cmd);
             check_init_status();
-        
+        }
+        else
+            fprintf(stderr,"%s: cmd(%d) is  GetSensorReading, so do not need to check init status\n",sensorName.c_str(),cmd);
+
     });
 
 }
@@ -192,8 +195,8 @@ void PLDMSensor::init(void)
         mutex_instanceID.lock();
         instance_id = instance_id_g++;
         if(debugP)
-            fprintf(stderr,"In init::instance_id :%x sensorName:%s sensorId:%x sensorDataSize:%x\n",instance_id,sensorName.c_str(),sensorId,sensorDataSize);
-        
+            fprintf(stderr,"%s: In init::instance_id :%x sensorId:%x sensorDataSize:%x\n",sensorName.c_str(),instance_id,sensorId,sensorDataSize);
+
         map<uint8_t, string>::iterator iter;
         iter = instanceIDmap.find(instance_id);
         if(iter != instanceIDmap.end())
@@ -201,19 +204,19 @@ void PLDMSensor::init(void)
             auto sensorName_m = iter->second ;
             instanceIDmap.erase(iter);
             if(debugP)
-                fprintf(stderr,"erase instance ID:%d for reusing in Init : sensor name:%sn",instance_id,sensorName_m.c_str());
+                fprintf(stderr,"%s: erase instance ID:%d for reusing in Init \n",sensorName_m.c_str(),instance_id);
         }
-        
+
         instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
-        
+
         if(instance_id_g>0x1F)
             instance_id_g=0;
         mutex_instanceID.unlock();
-        
+
         if( cmd == SetNumericSensorEnable )
         {
             if(debugP)
-                fprintf(stderr,"In init::SetNumericSensorEnable(%s) sensorId:%d instance_id:%d\n",sensorName.c_str(),sensorId,instance_id);
+                fprintf(stderr,"%s: In init::SetNumericSensorEnable sensorId:%d instance_id:%d\n",sensorName.c_str(),sensorId,instance_id);
             uint8_t dstEid = 8;
             uint8_t msgTag = 1;
             uint8_t sensor_operational_state = 0x0;
@@ -224,9 +227,9 @@ void PLDMSensor::init(void)
                 std::cerr << "Failed to encode request message for SetNumericSensorEnable" << " rc = " << rc << "\n";
                 return;
             }
-        
+
             requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-        
+
             auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                               "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
             method.append(dstEid, msgTag, true, requestMsg);
@@ -237,7 +240,7 @@ void PLDMSensor::init(void)
         else if( cmd == SetSensorThresholds )
         {
             if(debugP)
-                fprintf(stderr,"In init::SetSensorThresholds(%s) sensorDataSize:%x\n",sensorName.c_str(),sensorDataSize);
+                fprintf(stderr,"%s: In init::SetSensorThresholds sensorDataSize:%x\n",sensorName.c_str(),sensorDataSize);
             uint8_t dstEid = 8;
             uint8_t msgTag = 1;
             auto [rc, requestMsg] = createSetSensorThresholdRequestMsg(sensorId, sensorDataSize, THRESHOLDs_val_sensor);
@@ -246,9 +249,9 @@ void PLDMSensor::init(void)
                 std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
                 return;
             }
-        
+
             requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-        
+
             auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                               "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
             method.append(dstEid, msgTag, true, requestMsg);
@@ -259,28 +262,73 @@ void PLDMSensor::init(void)
         else if( cmd == GetSensorThresholds)
         {
             if(debugP)
-                fprintf(stderr,"In init::GetSensorThresholds(%s)\n",sensorName.c_str());
+                fprintf(stderr,"%s: In init::GetSensorThresholds\n",sensorName.c_str());
             uint8_t dstEid = 8;
             uint8_t msgTag = 1;
-        
+
             auto [rc, requestMsg] = createGetSensorThresholdRequestMsg(sensorId);
             if (rc != PLDM_SUCCESS)
             {
                 std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
                 return;
             }
-        
+
             requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-        
+
             auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                               "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
             method.append(dstEid, msgTag, true, requestMsg);
             dbusConnection->call_noreply(method);
             last_cmd = GetSensorThresholds;
             return;
+        }//sensor->hysteresis
+        else if( cmd == SetSensorHysteresis )
+        {
+            if(debugP)
+                fprintf(stderr,"%s: In init::SetSensorHysteresis: sensorDataSize:%x hysteresis:%d\n",sensorName.c_str(),sensorDataSize, hysteresis);
+            uint8_t dstEid = 8;
+            uint8_t msgTag = 1;
+            auto [rc, requestMsg] = createSetSensorHysteresisRequestMsg(sensorId, sensorDataSize, hysteresis);
+            if (rc != PLDM_SUCCESS)
+            {
+                std::cerr << "Failed to encode request message for SetSensorHysteresis" << " rc = " << rc << "\n";
+                return;
+            }
+
+            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+            method.append(dstEid, msgTag, true, requestMsg);
+            dbusConnection->call_noreply(method);
+            last_cmd = SetSensorHysteresis;
+            return;
+        }
+        else if( cmd == GetSensorHysteresis)
+        {
+            if(debugP)
+                fprintf(stderr,"%s: In init::GetSensorHysteresis\n",sensorName.c_str());
+            uint8_t dstEid = 8;
+            uint8_t msgTag = 1;
+
+            auto [rc, requestMsg] = createGetSensorHysteresisRequestMsg(sensorId);
+            if (rc != PLDM_SUCCESS)
+            {
+                std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
+                return;
+            }
+
+            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+            method.append(dstEid, msgTag, true, requestMsg);
+            dbusConnection->call_noreply(method);
+            last_cmd = GetSensorHysteresis;
+            return;
         }
         else
-            fprintf(stderr,"In init::unexpected cmd(%s)(cmd:%d)\n",sensorName.c_str(),cmd);
+            fprintf(stderr,"%s: In init::unexpected cmd:%d\n",sensorName.c_str(),cmd);
 
 }
 
@@ -341,17 +389,17 @@ void PLDMSensor::sensor_read_loop(void)
     waitTimer.async_wait([this](const boost::system::error_code& ec) {
 
         if(debugP)
-            fprintf(stderr,"PLDMSensor::read : sensorId =%X sensorName:%s\n",sensorId,sensorName.c_str());
+            fprintf(stderr,"%s: PLDMSensor::read : sensorId =%X\n",sensorName.c_str(),sensorId);
 
         if (ec == boost::asio::error::operation_aborted)
         {
-            std::cerr << "we're being cancelled sensor_read_loop\n";
+            fprintf(stderr,"%s: we're being cancelled sensor_read_loop\n",sensorName.c_str());
             return; // we're being cancelled
         }
         // read timer error
         else if (ec)
         {
-            std::cerr << "timer error in sensor_read_loop\n";
+            fprintf(stderr,"%s: timer error in sensor_read_loop\n",sensorName.c_str());
             return;
         }
 
@@ -374,12 +422,12 @@ void PLDMSensor::sensor_read_loop(void)
                 auto sensorName_m = iter->second ;
                 instanceIDmap.erase(iter);
                 if(debugP)
-                    fprintf(stderr,"erase instance ID:%d for reusing in sensor_reading  sensor name:%s n",instance_id,sensorName_m.c_str());
+                    fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
 
             }
 
             instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
-            
+
             if(instance_id_g>0x1F)
                 instance_id_g=0;
             mutex_instanceID.unlock();
@@ -448,6 +496,7 @@ void createSensors(
         int THRESHOLDs_val[6];
         std::string sensorDataSize;
         std::string rearmEventState;
+        int hysteresis_int;
 
         constexpr auto sensorID_json = "sensorID";
         constexpr auto sensorScale_json = "sensorScale";
@@ -465,6 +514,7 @@ void createSensors(
         constexpr auto sensorDataSize_json = "sensorDataSize";
         constexpr auto rearmEventState_json = "rearmEventState";
         constexpr auto powerState_json = "powerState";
+        constexpr auto hysteresis_json = "hysteresis";
 
         sensorId = static_cast<uint16_t>(record.value(sensorID_json, 0));
         sensorScale = record.value(sensorScale_json, 0);
@@ -475,6 +525,7 @@ void createSensors(
         sensorDataSize = record.value(sensorDataSize_json, "");
         objectType = record.value(objectType_json, "");
         powerState = record.value(powerState_json, "");
+        hysteresis_int = record.value(hysteresis_json, 0);
         rearmEventState = record.value(rearmEventState_json, "");
         THRESHOLDs_val_s[0] = record.value(upperThresholdWarning_json, "");
         THRESHOLDs_val_s[1] = record.value(upperThresholdCritical_json, "");
@@ -517,6 +568,8 @@ void createSensors(
         sensorId, sensorTypeName, sensorUnit,
         factor, sensorScale,objectType);
         sensor->powerState = powerState;
+        sensor->hysteresis = hysteresis_int;
+
         for(int i=0 ; i<6 ; i++)
             sensor->THRESHOLDs_val_sensor[i] = THRESHOLDs_val[i];
 
@@ -556,7 +609,7 @@ void check_pldm_device_status(void)
     pldmdeviceTimer->expires_from_now(boost::posix_time::seconds(3));
     // create a timer because normally multiple properties change
     pldmdeviceTimer->async_wait([&](const boost::system::error_code& ec) {
-
+        fprintf(stderr,"check_pldm_device_status() time's up (pldm_state:%d)(last_pldm_state:%d)\n",pldm_state, last_pldm_state);
         if (ec == boost::asio::error::operation_aborted)
         {
             std::cerr << "we're being cancelled\n";
@@ -569,7 +622,7 @@ void check_pldm_device_status(void)
             return;
         }
 
-        if( last_pldm_state == pldm_state )
+        if( (pldm_state!=OPER_SENSORS) && (last_pldm_state == pldm_state) )
         {
             fprintf(stderr,"check_pldm_device_status() : time's up(last_pldm_state:%d)==(pldm_state:%d)\n",last_pldm_state,pldm_state);
             map<uint8_t, string>::iterator iter;
@@ -585,6 +638,7 @@ void check_pldm_device_status(void)
             }
             if( last_pldm_state == SET_TID)
             {
+                fprintf(stderr,"resend SET_TID command\n");
                 auto [rc, requestMsg] = createSetTIDRequestMsg(TID);
                 if (rc != PLDM_SUCCESS)
                 {
@@ -602,6 +656,7 @@ void check_pldm_device_status(void)
             }
             else if( last_pldm_state == GET_TID)
             {
+                fprintf(stderr,"resend GET_TID command\n");
                 auto [rc, requestMsg] = createGetTIDRequestMsg();
                 if (rc != PLDM_SUCCESS)
                 {
@@ -609,7 +664,7 @@ void check_pldm_device_status(void)
                     return;
                 }
                 requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-            
+
                 auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                                   "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
                 method.append(dstEid, msgTag, true, requestMsg);
@@ -619,6 +674,7 @@ void check_pldm_device_status(void)
             }
             else if( last_pldm_state == GET_TYPE)
             {
+                fprintf(stderr,"resend GET_TYPE command\n");
                 auto [rc, requestMsg] = createGetTypeRequestMsg();
                 if (rc != PLDM_SUCCESS)
                 {
@@ -626,7 +682,7 @@ void check_pldm_device_status(void)
                     return;
                 }
                 requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-            
+
                 auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                                   "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
                 method.append(dstEid, msgTag, true, requestMsg);
@@ -706,8 +762,11 @@ int main(void)
                             return;
                         }
                         else
+                        {
                             pldm_state = GET_TID;
-                    
+                            fprintf(stderr,"Set TID successfully\n");
+                        }
+
                         auto [rc, requestMsg] = createGetTIDRequestMsg();
                         if (rc != PLDM_SUCCESS)
                         {
@@ -715,10 +774,10 @@ int main(void)
                             return;
                         }
                         requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-                    
+
                         auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                                           "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-                    
+
                         uint8_t dstEid = 8;
                         uint8_t msgTag = 1;
                         method.append(dstEid, msgTag, true, requestMsg);
@@ -736,10 +795,10 @@ int main(void)
                             fprintf(stderr,"TID compare fail\n");
                             return;
                         }
-                    
+
                         fprintf(stderr,"TID compare successfully, then send GetType Req\n");
                         pldm_state = GET_TYPE;
-                    
+
                         auto [rc, requestMsg] = createGetTypeRequestMsg();
                         if (rc != PLDM_SUCCESS)
                         {
@@ -747,10 +806,10 @@ int main(void)
                             return;
                         }
                         requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-                    
+
                         auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
                                                           "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-                    
+
                         uint8_t dstEid = 8;
                         uint8_t msgTag = 1;
                         method.append(dstEid, msgTag, true, requestMsg);
@@ -775,7 +834,7 @@ int main(void)
                         }
                         else
                             fprintf(stderr,"This PLDM device supports PLDM_PLATFORM\n");
-                    
+
                         createSensors(io, objectServer, sensors, systemBus);
                         if (sensors.empty())
                         {
@@ -784,57 +843,88 @@ int main(void)
                         else
                         {
                             fprintf(stderr,"Create Sensors successfully\n");
-                            pldm_state = OPER_SENSORS;
+                            last_pldm_state = pldm_state = OPER_SENSORS;
                         }
                         return;
                     }
                     else if (pldm_state == OPER_SENSORS)
                     {
-                       auto& sensor = sensors[sensorName];
-                       if(debugP)
-                           fprintf(stderr,"Resp of sensorName:%s instance_id:%x sensor->cmd:%d\n",sensorName.c_str(),instance_id,sensor->cmd);
-                       if(sensor->cmd == GetSensorReading)
-                       {
-                           double PRESENT_val;
-                           if(parseSensorReadingResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &PRESENT_val)<0)
-                           {
-                               fprintf(stderr,"Parse SensorReading Response Fail\n");
-                               return;
-                           }
-                           PRESENT_val = PRESENT_val*sensor->sensorFactor;
-                           sensor->updateValue(PRESENT_val);
-                       }
-                       else if(sensor->cmd == SetNumericSensorEnable)
-                       {
-                           if(parseSetNumericSensorEnableResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
-                               fprintf(stderr,"Parse SetNumericSensorEnable Response Fail\n");
-                           else
-                               sensor->cmd = SetSensorThresholds;
-                           sensor->init();
-                       }
-                       else if(sensor->cmd == SetSensorThresholds)
-                       {
-                           if(parseSetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
-                               fprintf(stderr,"Parse SetSensorThresholds Response Fail\n");
-                           else
-                               sensor->cmd = GetSensorThresholds;
-                           sensor->init();
-                       }
-                       else if(sensor->cmd == GetSensorThresholds)
-                       {
+                        auto& sensor = sensors[sensorName];
+                        if(debugP)
+                            fprintf(stderr,"%s: Resp instance_id:%x sensor->cmd:%d\n",sensor->sensorName.c_str(),instance_id,sensor->cmd);
+                        if(sensor->cmd == GetSensorReading)
+                        {
+                            double PRESENT_val;
+                            if(parseSensorReadingResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &PRESENT_val)<0)
+                            {
+                                fprintf(stderr,"%s: Parse SensorReading Response Fail\n",sensor->sensorName.c_str());
+                                return;
+                            }
+                            PRESENT_val = PRESENT_val*sensor->sensorFactor;
+                            sensor->updateValue(PRESENT_val);
+                        }
+                        else if(sensor->cmd == SetNumericSensorEnable)
+                        {
+                            if(parseSetNumericSensorEnableResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                fprintf(stderr,"%s: Parse SetNumericSensorEnable Response Fail\n",sensor->sensorName.c_str());
+                            else
+                                sensor->cmd = SetSensorThresholds;
+                            sensor->init();
+                        }
+                        else if(sensor->cmd == SetSensorThresholds)
+                        {
+                            if(parseSetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                fprintf(stderr,"%s: Parse SetSensorThresholds Response Fail\n",sensor->sensorName.c_str());
+                            else
+                            {
+                                sensor->cmd = GetSensorThresholds;
+                                fprintf(stderr,"%s: SetSensorThresholds successfully\n",sensor->sensorName.c_str());
+                            }
+                            sensor->init();
+                        }
+                        else if(sensor->cmd == GetSensorThresholds)
+                        {
                            int THRESHOLDs_val[6];
                            parseGetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, THRESHOLDs_val );
-                    
-                           for(int i=0 ; i<6 ; i++)
-                               if(sensor->THRESHOLDs_val_sensor[i] != THRESHOLDs_val[i])
-                               {
-                                   fprintf(stderr,"Compare sensor threshold fail\n");
+
+                            for(int i=0 ; i<6 ; i++)
+                                if(sensor->THRESHOLDs_val_sensor[i] != THRESHOLDs_val[i])
+                                {
+                                   fprintf(stderr,"%s: Compare sensor threshold fail\n",sensor->sensorName.c_str());
                                    sensor->init();
                                    return;
-                               }
-                    
+                                }
+                            fprintf(stderr,"%s: Compare sensor threshold successfully, and then SetSensorHysteresis\n",sensor->sensorName.c_str());
+                            sensor->cmd = SetSensorHysteresis;
+                            sensor->init();
+                        }
+                        else if(sensor->cmd == SetSensorHysteresis)
+                        {
+                            fprintf(stderr,"%s: Response of SetSensorHysteresis\n",sensor->sensorName.c_str());
+                            if(parseSetSensorHysteresisResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                fprintf(stderr,"%s: Parse SetSensorHysteresis Response Fail\n",sensor->sensorName.c_str());
+                            else
+                            {
+                                fprintf(stderr,"%s: SetSensorHysteresis successfully\n",sensor->sensorName.c_str());
+                                sensor->cmd = GetSensorHysteresis;
+                            }
+                            sensor->init();
+                        }
+                       else if(sensor->cmd == GetSensorHysteresis)
+                       {
+                           fprintf(stderr,"%s: Response of GetSensorHysteresis\n",sensor->sensorName.c_str());
+                           int Hysteresis_val;
+                           parseGetSensorHysteresisResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &Hysteresis_val );
+                           fprintf(stderr,"%s: Hysteresis_val:%d\n",sensorName.c_str(),Hysteresis_val);
+                            if(sensor->hysteresis != Hysteresis_val)
+                            {
+                                fprintf(stderr,"%s: Compare sensor hysteresis fail\n",sensor->sensorName.c_str());
+                                sensor->init();
+                                return;
+                            }
+
                            sensor->cmd = GetSensorReading;
-                           fprintf(stderr,"Start sensor read : sensorId =%X sensorName:%s\n",sensor->sensorId,sensor->sensorName.c_str());
+                           fprintf(stderr,"%s: GetSensorHysteresis successfully, Start sensor read : sensorId =%X\n",sensor->sensorName.c_str(),sensor->sensorId);
                            sensor->sensor_read_loop();
                        }
                         return;
