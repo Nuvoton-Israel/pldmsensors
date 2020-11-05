@@ -332,7 +332,7 @@ int parseGetSensorHysteresisResponseMsg(pldm_msg* responsePtr, size_t payloadLen
         }
     }
     else
-        fprintf(stderr,"GetHysteresis Response command should be PLDM_GET_SENSOR_HYSTERESIS, but we got (%x)\n", PLDM_GET_SENSOR_HYSTERESIS, resphdr->command);
+        fprintf(stderr,"GetHysteresis Response command should be PLDM_GET_SENSOR_HYSTERESIS, but we got (%x)\n", resphdr->command);
     return -1;
 }
 

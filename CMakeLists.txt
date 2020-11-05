@@ -124,7 +124,7 @@ include_directories (${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable (pldmsensor src/PLDMSensorMain.cpp ${PLDM_SRC_FILES})
 add_dependencies (pldmsensor sdbusplus-project)
 target_link_libraries (pldmsensor ${SENSOR_LINK_LIBS})
-target_link_libraries (pldmsensor pldm_intel)
+target_link_libraries (pldmsensor pldm_intel i2c)
 
 if (NOT YOCTO)
     add_dependencies (pldmsensor ${EXTERNAL_PACKAGES})

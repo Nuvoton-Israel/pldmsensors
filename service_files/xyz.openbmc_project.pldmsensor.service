@@ -1,7 +1,10 @@
 [Unit]
 Description=PLDM Sensor
 StopWhenUnneeded=false
-After=xyz.openbmc_project.mctpd@.service
+After=xyz.openbmc_project.mctpd@smbus.service
+Requires=xyz.openbmc_project.mctpd@smbus.service
+After=xyz.openbmc_project.State.Host.service
+Requires=xyz.openbmc_project.State.Host.service
 
 [Service]
 Restart=always

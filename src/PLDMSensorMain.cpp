@@ -22,6 +22,15 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+
+extern "C" {
+#include <errno.h>
+#include <i2c/smbus.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
+}
+
+
 #include <sdbusplus/bus.hpp>
 #include <sdbusplus/bus/match.hpp>
 #include <sdbusplus/message.hpp>
@@ -606,21 +615,52 @@ void check_pldm_device_status(void)
     uint8_t dstEid = 8;
     uint8_t msgTag = 1;
 
-    pldmdeviceTimer->expires_from_now(boost::posix_time::seconds(3));
+    pldmdeviceTimer->expires_from_now(boost::posix_time::seconds(5));
     // create a timer because normally multiple properties change
     pldmdeviceTimer->async_wait([&](const boost::system::error_code& ec) {
-        fprintf(stderr,"check_pldm_device_status() time's up (pldm_state:%d)(last_pldm_state:%d)\n",pldm_state, last_pldm_state);
         if (ec == boost::asio::error::operation_aborted)
         {
-            std::cerr << "we're being cancelled\n";
+            std::cerr << "check_pldm_device_status(): we're being cancelled\n";
             return; // we're being cancelled
         }
         // read timer error
         else if (ec)
         {
-            std::cerr << "timer error\n";
+            std::cerr << "check_pldm_device_status(): timer error\n";
             return;
         }
+        std::string i2cBus = "/dev/i2c-2";
+
+        int outFd = open(i2cBus.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+
+        constexpr uint8_t Addr = 0x71;
+
+        if (outFd < 0)
+        {
+            if(debugP)
+                fprintf(stderr,"Open %s fail...\n",i2cBus.c_str());
+            return;
+        }
+
+        if ( (ioctl(outFd, I2C_SLAVE, Addr) < 0)  && (pldm_state < OPER_SENSORS ))
+        {
+            // busy slave
+            if(debugP)
+                fprintf(stderr,"PLDM device is not ready or busy...\n");
+            check_pldm_device_status();
+            return;
+        }
+        else if ( (i2c_smbus_read_byte(outFd) < 0) && (pldm_state < OPER_SENSORS ))
+        {
+            // no device
+            if(debugP)
+                fprintf(stderr,"PLDM device doesn't exist...\n");
+            check_pldm_device_status();
+            return;
+        }
+        fprintf(stderr,"PLDM device %02X exists\n",Addr);
+
+        fprintf(stderr,"check_pldm_device_status() time's up (pldm_state:%d)(last_pldm_state:%d)\n",pldm_state, last_pldm_state);
 
         if( (pldm_state!=OPER_SENSORS) && (last_pldm_state == pldm_state) )
         {
@@ -931,7 +971,10 @@ int main(void)
                     }
                 }
                 else
+                {
+                    fprintf(stderr,"Got response from MessageReceivedSignal(pldm_state=%d), but there is no matched item in map\n",pldm_state);
                     return;
+                }
         };
 
     auto match = std::make_unique<sdbusplus::bus::match::match>(
