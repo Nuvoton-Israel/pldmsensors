@@ -47,6 +47,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
+
 #include "PLDMSensor.hpp"
 #include "Utils.hpp"
 #include "VariantVisitors.hpp"
@@ -83,6 +84,9 @@ static constexpr double PLDMMinReading = 0x0;
 uint8_t instance_id_g = 0;
 boost::mutex mutex_instanceID;
 boost::container::flat_map<std::string, std::unique_ptr<PLDMSensor>> sensors;
+boost::container::flat_map<std::string, std::unique_ptr<PLDMEffecter>> effecters;
+boost::container::flat_map<std::string, std::unique_ptr<PLDMStateSensor>> state_sensors;
+boost::container::flat_map<std::string, std::unique_ptr<PLDMNumericEffecter>> numeric_effecters;
 
 volatile pldm_device_state pldm_state = SET_TID;
 volatile pldm_device_state last_pldm_state;
@@ -91,16 +95,830 @@ boost::asio::io_service io;
 std::unique_ptr<boost::asio::deadline_timer> pldmdeviceTimer;
 auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
 
-
-constexpr auto MAPPER_BUSNAME = "xyz.openbmc_project.ObjectMapper";
-constexpr auto MAPPER_PATH = "/xyz/openbmc_project/object_mapper";
-constexpr auto MAPPER_INTERFACE = "xyz.openbmc_project.ObjectMapper";
-
-constexpr auto PROPERTY_INTERFACE = "org.freedesktop.DBus.Properties";
-
 map<uint8_t, string> instanceIDmap;
-static constexpr const char* sensorPathPrefix = "/xyz/openbmc_project/sensors/";
+const std::string& sensorPathPrefix = "/xyz/openbmc_project/sensors/";
+const std::string& effecterPathPrefix = "/xyz/openbmc_project/effecters/";
+const std::string& numericeffecterPathPrefix = "/xyz/openbmc_project/numericeffecters/";
+const std::string& statesensorPathPrefix = "/xyz/openbmc_project/statesensors/";
 const std::string& sensorConfiguration="/xyz/openbmc_project/inventory/system/chassis";
+
+/*Effecter--Start*/
+//State-Effecter
+
+PLDMEffecter::PLDMEffecter(std::shared_ptr<sdbusplus::asio::connection>& conn,
+                             boost::asio::io_service& io,
+                             const std::string& effecterName,
+                             sdbusplus::asio::object_server& objectServer,
+                             uint16_t effecterId,
+                             const std::string& effecterTypeName,
+                             const std::string& effecterUnit
+                             ) :
+    Effecter(boost::replace_all_copy(effecterName, " ", "_"),
+           conn),
+    effecterId(effecterId),
+    objectServer(objectServer), dbusConnection(conn),
+    effecterName(effecterName), effecterTypeName(effecterTypeName)
+{
+    dbusPath = effecterPathPrefix + effecterTypeName + "/" + name;
+
+    effecterInterface = objectServer.add_interface(dbusPath, effecterStateInterface);
+    effecterInterface->register_property("effecterId", effecterId);
+
+    effecterInterface->register_property("effecterOperationalState",std::numeric_limits<uint8_t>::quiet_NaN());
+    effecterInterface->register_property("present_state",std::numeric_limits<uint8_t>::quiet_NaN());
+    effecterInterface->register_property("previous_state",std::numeric_limits<uint8_t>::quiet_NaN());
+    effecterInterface->register_property("event_state",std::numeric_limits<uint8_t>::quiet_NaN());
+    effecterInterface->register_property("completeionCode",std::numeric_limits<uint8_t>::quiet_NaN());
+    effecterInterface->register_property("setDeviceState",std::numeric_limits<string>::quiet_NaN(), sdbusplus::asio::PropertyPermission::readWrite);
+
+    effecterInterface->register_method(
+        "SetEffecterStateMessagePayload",
+        [this](uint16_t effecter_id, bool set_request, uint8_t effecter_state) {
+            uint8_t dstEid = 8;
+            uint8_t msgTag = 1;
+            uint8_t instance_id = 0;
+            uint8_t compEffecterCnt = 0x1;
+
+            fprintf(stderr,"SetEffecterStateMessagePayload: name:%s\n",name.c_str());
+            //Get instanceID for PLDM msg--start
+            mutex_instanceID.lock();
+            instance_id = instance_id_g++;
+
+            map<uint8_t, string>::iterator iter;
+
+            iter = instanceIDmap.find(instance_id);
+            if(iter != instanceIDmap.end())
+            {
+                auto sensorName_m = iter->second ;
+                instanceIDmap.erase(iter);
+                if(debugP)
+                    fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+
+            }
+
+            instanceIDmap.insert(pair<uint8_t, string>(instance_id, name));
+
+            if(instance_id_g>0x1F)
+                instance_id_g=0;
+            mutex_instanceID.unlock();
+            //Get instanceID for PLDM msg--End
+
+            std::array<set_effecter_state_field, 8> stateField{};
+
+            if(set_request)
+                stateField[0] = {PLDM_REQUEST_SET, effecter_state};
+            else
+                stateField[0] = {PLDM_NO_CHANGE, effecter_state};
+
+            std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 5);
+
+            auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+            auto rc = encode_set_state_effecter_states_req(
+                instance_id, effecter_id, compEffecterCnt, stateField.data(), request);
+
+            if (rc != PLDM_SUCCESS)
+            {
+                std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                return -1;
+            }
+            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+            auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+            method.append(dstEid, msgTag, true, requestMsg);
+            systemBus->call_noreply(method);
+            return 0;
+    });
+
+    effecterInterface->register_method(
+        "GetEffecterStateMessagePayload",
+        [this](uint16_t effecter_id) {
+            uint8_t dstEid = 8;
+            uint8_t msgTag = 1;
+            uint8_t instance_id = 0;
+            uint8_t compEffecterCnt = 0x1;
+
+            fprintf(stderr,"GetEffecterStateMessagePayload: name:%s\n",name.c_str());
+            //Get instanceID for PLDM msg--start
+            mutex_instanceID.lock();
+            instance_id = instance_id_g++;
+
+            map<uint8_t, string>::iterator iter;
+
+            iter = instanceIDmap.find(instance_id);
+            if(iter != instanceIDmap.end())
+            {
+                auto sensorName_m = iter->second ;
+                instanceIDmap.erase(iter);
+                if(debugP)
+                    fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+            }
+
+            instanceIDmap.insert(pair<uint8_t, string>(instance_id, name));
+
+            if(instance_id_g>0x1F)
+                instance_id_g=0;
+            mutex_instanceID.unlock();
+            //Get instanceID for PLDM msg--End
+
+            std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 2);
+            auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+            auto rc = encode_get_state_effecter_states_req( instance_id, effecter_id, request);
+
+            if (rc != PLDM_SUCCESS)
+            {
+                std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                return -1;
+            }
+            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+            auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+            method.append(dstEid, msgTag, true, requestMsg);
+            systemBus->call_noreply(method);
+            return 0;
+    });
+}
+
+PLDMEffecter::~PLDMEffecter()
+{
+    objectServer.remove_interface(effecterInterface);
+}
+
+void PLDMEffecter::init(void)
+{
+    std::function<void(sdbusplus::message::message&)> eventHandlerProperty =
+        [&](sdbusplus::message::message& message) {
+
+                if (strcmp(message.get_member(), "PropertiesChanged") != 0)
+                {
+                    fprintf(stderr,"member:%s is unexpected\n",message.get_member());
+                    return;
+                }
+
+
+                using Interface = std::string;
+                using Property = std::string;
+                using Value = std::string;
+                using Properties = std::map<Property, std::variant<Value>>;
+
+                Interface interface;
+                Properties properties;
+
+                message.read(interface, properties);
+
+                for (const auto& p : properties)
+                {
+                    auto property_s = p.first;
+                    if(property_s.compare("setDeviceState")==0)
+                    {
+                        auto value_s = std::get<std::string>(p.second);
+                        fprintf(stderr,"PropertiesChanged for [%s][%s] \n", name.c_str(), message.get_path());
+                        fprintf(stderr,"    interface is %s\n",interface.c_str());
+                        fprintf(stderr,"        Property:%s Value:%s \n",p.first.c_str(),value_s.c_str());
+
+                        std::array<set_effecter_state_field, 8> stateField{};
+                        if(value_s.compare(effecterstate1)==0)
+                        {
+                            fprintf(stderr,"set to state1\n");
+                            uint8_t effecter_state = 0x1;
+                            stateField[0] = {PLDM_REQUEST_SET, effecter_state};
+                        }
+                        else if(value_s.compare(effecterstate2)==0)
+                        {
+                            fprintf(stderr,"set to state 2\n");
+                            uint8_t effecter_state = 0x2;
+                            stateField[0] = {PLDM_REQUEST_SET, effecter_state};
+                        }
+
+                        uint8_t dstEid = 8;
+                        uint8_t msgTag = 1;
+                        uint8_t instance_id = 0;
+                        uint8_t compEffecterCnt = 0x1;
+
+
+                        //Get instanceID for PLDM msg--start
+                        mutex_instanceID.lock();
+                        instance_id = instance_id_g++;
+
+                        map<uint8_t, string>::iterator iter;
+
+                        iter = instanceIDmap.find(instance_id);
+                        if(iter != instanceIDmap.end())
+                        {
+                            auto sensorName_m = iter->second ;
+                            instanceIDmap.erase(iter);
+                            if(debugP)
+                                fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+
+                        }
+
+                        instanceIDmap.insert(pair<uint8_t, string>(instance_id, name));
+
+                        if(instance_id_g>0x1F)
+                            instance_id_g=0;
+                        mutex_instanceID.unlock();
+                        //Get instanceID for PLDM msg--End
+
+
+                        std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 5);
+                        fprintf(stderr,"encode a set state effecter state request\n");
+                        auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+                        auto rc = encode_set_state_effecter_states_req(
+                            instance_id, effecterId, compEffecterCnt, stateField.data(), request);
+
+                        if (rc != PLDM_SUCCESS)
+                        {
+                            std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                            return ;
+                        }
+                        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+                        auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+                        method.append(dstEid, msgTag, true, requestMsg);
+                        systemBus->call_noreply(method);
+                        fprintf(stderr,"send a set state effecter state request\n");
+                    }
+                }
+
+        };
+
+    auto matchPropertry = std::make_unique<sdbusplus::bus::match::match>(
+        static_cast<sdbusplus::bus::bus&>(*systemBus),
+        "interface='org.freedesktop.DBus.Properties',type='signal',"
+        "member='PropertiesChanged',path='"+ dbusPath + "'",
+        eventHandlerProperty);
+
+    matches.emplace_back(std::move(matchPropertry));
+
+/*Get state efecter state first time*/
+    fprintf(stderr,"get state_effecter state in init()\n");
+    uint8_t dstEid = 8;
+    uint8_t msgTag = 1;
+
+    mutex_instanceID.lock();
+    instance_id = instance_id_g++;
+
+    map<uint8_t, string>::iterator iter;
+
+    iter = instanceIDmap.find(instance_id);
+    if(iter != instanceIDmap.end())
+    {
+        auto effecterName_m = iter->second ;
+        instanceIDmap.erase(iter);
+        if(debugP)
+            fprintf(stderr,"%s: erase instance ID:%d for reusing in effecter init\n",effecterName_m.c_str(),instance_id);
+    }
+
+    instanceIDmap.insert(pair<uint8_t, string>(instance_id, effecterName));
+
+    if(instance_id_g>0x1F)
+        instance_id_g=0;
+    mutex_instanceID.unlock();
+    //Get instanceID for PLDM msg--End
+
+    std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 2);
+    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+    auto rc = encode_get_state_effecter_states_req( instance_id, effecterId, request);
+
+    if (rc != PLDM_SUCCESS)
+    {
+        std::cerr << "Failed to encode request message for state effect reading" << " rc = " << rc << "\n";
+        return;
+    }
+    requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+    auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                      "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+    method.append(dstEid, msgTag, true, requestMsg);
+    systemBus->call_noreply(method);
+}
+//State-Effecter
+//Numeric-Effecter
+
+PLDMNumericEffecter::PLDMNumericEffecter(std::shared_ptr<sdbusplus::asio::connection>& conn,
+                             boost::asio::io_service& io,
+                             const std::string& effecterName,
+                             sdbusplus::asio::object_server& objectServer,
+                             uint16_t effecterId,
+                             const std::string& effecterTypeName,
+                             const std::string& effecterUnit
+                             ) :
+    Effecter(boost::replace_all_copy(effecterName, " ", "_"),
+           conn),
+    effecterId(effecterId),
+    objectServer(objectServer), dbusConnection(conn),
+    effecterName(effecterName), effecterTypeName(effecterTypeName)
+{
+    uint8_t effecterOperationalState = 0;
+    uint32_t pendingValue = 0;
+    uint32_t presentValue = 0;
+    std::string setNumericValue = "nan";
+    dbusPath = numericeffecterPathPrefix + effecterTypeName + "/" + name;
+
+    effecterInterface = objectServer.add_interface(dbusPath, effecterStateInterface);
+    effecterInterface->register_property("effecterId", effecterId);
+
+    effecterInterface->register_property("effecterOperationalState",effecterOperationalState);
+    effecterInterface->register_property("pendingValue",pendingValue);
+    effecterInterface->register_property("presentValue",presentValue);
+    effecterInterface->register_property("setNumericValue",setNumericValue, sdbusplus::asio::PropertyPermission::readWrite);
+    effecterInterface->register_property("effecterUnit",effecterUnit);
+    effecterInterface->register_method(
+        "SetEffecterNumericMessagePayload",
+        [this](uint16_t effecter_id, std::string effecter_value_s) {
+            uint8_t dstEid = 8;
+            uint8_t msgTag = 1;
+            uint8_t instance_id = 0;
+            uint8_t compEffecterCnt = 0x1;
+
+            fprintf(stderr,"SetEffecterNumericMessagePayload: name:%s effecter_value_s.size():%d\n",name.c_str(),effecter_value_s.size());
+            //Get instanceID for PLDM msg--start
+            mutex_instanceID.lock();
+            instance_id = instance_id_g++;
+
+            map<uint8_t, string>::iterator iter;
+
+            iter = instanceIDmap.find(instance_id);
+            if(iter != instanceIDmap.end())
+            {
+                auto sensorName_m = iter->second ;
+                instanceIDmap.erase(iter);
+                if(debugP)
+                    fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+
+            }
+
+            instanceIDmap.insert(pair<uint8_t, string>(instance_id, name));
+
+            if(instance_id_g>0x1F)
+                instance_id_g=0;
+            mutex_instanceID.unlock();
+            //Get instanceID for PLDM msg--End
+
+            uint32_t value = atoi(effecter_value_s.c_str());
+            uint8_t effecter_value[4] = {};
+            uint8_t size;
+            if (effecterDataSize == PLDM_EFFECTER_DATA_SIZE_UINT8 ||
+               effecterDataSize == PLDM_EFFECTER_DATA_SIZE_SINT8)
+            {
+                size = 0;
+                effecter_value[0] = value;
+            }
+           else if (effecterDataSize == PLDM_EFFECTER_DATA_SIZE_UINT16 ||
+               effecterDataSize == PLDM_EFFECTER_DATA_SIZE_SINT16)
+            {
+                size = 1;
+                value = htole16(value);
+                memcpy(effecter_value, &value, 2);
+            }
+           else if (effecterDataSize == PLDM_EFFECTER_DATA_SIZE_UINT32 ||
+               effecterDataSize == PLDM_EFFECTER_DATA_SIZE_SINT32)
+            {
+                size = 3;
+                value = htole32(value);
+                memcpy(effecter_value, &value, 4);
+            }
+
+            std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + PLDM_SET_NUMERIC_EFFECTER_VALUE_MIN_REQ_BYTES + size);
+
+            auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+
+            auto rc = encode_set_numeric_effecter_value_req(
+                instance_id, effecter_id, size,
+                effecter_value,
+                request,
+                PLDM_SET_NUMERIC_EFFECTER_VALUE_MIN_REQ_BYTES + size);
+
+            if (rc != PLDM_SUCCESS)
+            {
+                std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                return -1;
+            }
+            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+            auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+            method.append(dstEid, msgTag, true, requestMsg);
+            systemBus->call_noreply(method);
+            return 0;
+    });
+
+    effecterInterface->register_method(
+        "GetEffecterNumericMessagePayload",
+        [this](uint16_t effecter_id) {
+            uint8_t dstEid = 8;
+            uint8_t msgTag = 1;
+            uint8_t instance_id = 0;
+
+            fprintf(stderr,"GetEffecterNumericMessagePayload: name:%s\n",name.c_str());
+            //Get instanceID for PLDM msg--start
+            mutex_instanceID.lock();
+            instance_id = instance_id_g++;
+
+            map<uint8_t, string>::iterator iter;
+
+            iter = instanceIDmap.find(instance_id);
+            if(iter != instanceIDmap.end())
+            {
+                auto sensorName_m = iter->second ;
+                instanceIDmap.erase(iter);
+                if(debugP)
+                    fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+            }
+
+            instanceIDmap.insert(pair<uint8_t, string>(instance_id, name));
+
+            if(instance_id_g>0x1F)
+                instance_id_g=0;
+            mutex_instanceID.unlock();
+            //Get instanceID for PLDM msg--End
+
+            std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + PLDM_GET_NUMERIC_EFFECTER_VALUE_REQ_BYTES);
+            auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+            auto rc = encode_get_numeric_effecter_value_req(instance_id, effecter_id, request);
+
+            if (rc != PLDM_SUCCESS)
+            {
+                std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                return -1;
+            }
+            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+            auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+            method.append(dstEid, msgTag, true, requestMsg);
+            systemBus->call_noreply(method);
+            return 0;
+    });
+}
+
+PLDMNumericEffecter::~PLDMNumericEffecter()
+{
+    objectServer.remove_interface(effecterInterface);
+}
+
+void PLDMNumericEffecter::init(void)
+{
+    std::function<void(sdbusplus::message::message&)> eventHandlerProperty =
+        [&](sdbusplus::message::message& message) {
+
+                if (strcmp(message.get_member(), "PropertiesChanged") != 0)
+                {
+                    fprintf(stderr,"member:%s is unexpected\n",message.get_member());
+                    return;
+                }
+
+                using Interface = std::string;
+                using Property = std::string;
+                using Value = std::string;
+                using Properties = std::map<Property, std::variant<Value>>;
+
+                Interface interface;
+                Properties properties;
+
+                message.read(interface, properties);
+
+                for (const auto& p : properties)
+                {
+                    auto property_s = p.first;
+                    if(property_s.compare("setNumericValue")==0)
+                    {
+                        auto value_s = std::get<std::string>(p.second);
+                        fprintf(stderr,"PropertiesChanged for NumericEffecter [%s][%s] \n", name.c_str(), message.get_path());
+                        fprintf(stderr,"    interface:%s\n",interface.c_str());
+                        fprintf(stderr,"    Property:%s Value:%s \n",p.first.c_str(),value_s.c_str());
+
+                        uint8_t dstEid = 8;
+                        uint8_t msgTag = 1;
+                        uint8_t instance_id = 0;
+
+                        //Get instanceID for PLDM msg--start
+                        mutex_instanceID.lock();
+                        instance_id = instance_id_g++;
+
+                        map<uint8_t, string>::iterator iter;
+
+                        iter = instanceIDmap.find(instance_id);
+                        if(iter != instanceIDmap.end())
+                        {
+                            auto sensorName_m = iter->second ;
+                            instanceIDmap.erase(iter);
+                            if(debugP)
+                                fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+
+                        }
+
+                        instanceIDmap.insert(pair<uint8_t, string>(instance_id, name));
+
+                        if(instance_id_g>0x1F)
+                            instance_id_g=0;
+                        mutex_instanceID.unlock();
+                        //Get instanceID for PLDM msg--End
+
+                        uint32_t value = atoi(value_s.c_str());
+                        uint8_t effecter_value[4] = {};
+                        uint8_t size;
+                        if (effecterDataSize == PLDM_EFFECTER_DATA_SIZE_UINT8 ||
+                           effecterDataSize == PLDM_EFFECTER_DATA_SIZE_SINT8)
+                        {
+                            fprintf(stderr,"effecterDataSize is INT8\n");
+                            size = 0;
+                            effecter_value[0] = value;
+                        }
+                       else if (effecterDataSize == PLDM_EFFECTER_DATA_SIZE_UINT16 ||
+                           effecterDataSize == PLDM_EFFECTER_DATA_SIZE_SINT16)
+                        {
+                            fprintf(stderr,"effecterDataSize is INT16\n");
+                            size = 1;
+                            value = htole16(value);
+                            memcpy(effecter_value, &value, 2);
+                        }
+                       else if (effecterDataSize == PLDM_EFFECTER_DATA_SIZE_UINT32 ||
+                           effecterDataSize == PLDM_EFFECTER_DATA_SIZE_SINT32)
+                        {
+                            fprintf(stderr,"effecterDataSize is INT32\n");
+                            size = 3;
+                            value = htole32(value);
+                            memcpy(effecter_value, &value, 4);
+                        }
+
+                        std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + PLDM_SET_NUMERIC_EFFECTER_VALUE_MIN_REQ_BYTES + size);
+
+                        auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+                        fprintf(stderr,"encode a set numeric effecter value request\n");
+                        auto rc = encode_set_numeric_effecter_value_req(
+                            instance_id, effecterId, size,
+                            effecter_value,
+                            request,
+                            PLDM_SET_NUMERIC_EFFECTER_VALUE_MIN_REQ_BYTES + size);
+
+
+                        if (rc != PLDM_SUCCESS)
+                        {
+                            std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                            return ;
+                        }
+                        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+                        auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+                        method.append(dstEid, msgTag, true, requestMsg);
+                        systemBus->call_noreply(method);
+                        fprintf(stderr,"send a set numeric effecter value request\n");
+                    }
+                }
+
+        };
+
+    auto matchPropertry = std::make_unique<sdbusplus::bus::match::match>(
+        static_cast<sdbusplus::bus::bus&>(*systemBus),
+        "interface='org.freedesktop.DBus.Properties',type='signal',"
+        "member='PropertiesChanged',path='"+ dbusPath + "'",
+        eventHandlerProperty);
+
+    matches.emplace_back(std::move(matchPropertry));
+
+    fprintf(stderr,"Send get_numeric_effecter_value req in init() [%s]\n", name.c_str());
+    uint8_t dstEid = 8;
+    uint8_t msgTag = 1;
+
+    mutex_instanceID.lock();
+    instance_id = instance_id_g++;
+
+    map<uint8_t, string>::iterator iter;
+
+    iter = instanceIDmap.find(instance_id);
+    if(iter != instanceIDmap.end())
+    {
+        auto effecterName_m = iter->second ;
+        instanceIDmap.erase(iter);
+        if(debugP)
+            fprintf(stderr,"%s: erase instance ID:%d for reusing in effecter init\n",effecterName_m.c_str(),instance_id);
+    }
+
+    instanceIDmap.insert(pair<uint8_t, string>(instance_id, effecterName));
+
+    if(instance_id_g>0x1F)
+        instance_id_g=0;
+    mutex_instanceID.unlock();
+    //Get instanceID for PLDM msg--End
+
+    std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 2);
+    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+    auto rc = encode_get_numeric_effecter_value_req( instance_id, effecterId, request);
+
+    if (rc != PLDM_SUCCESS)
+    {
+        std::cerr << "Failed to encode request message for state effect reading" << " rc = " << rc << "\n";
+        return;
+    }
+    requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+    auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                      "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+    method.append(dstEid, msgTag, true, requestMsg);
+    systemBus->call_noreply(method);
+}
+
+/*Effecter--End*/
+
+PLDMStateSensor::PLDMStateSensor(std::shared_ptr<sdbusplus::asio::connection>& conn,
+                             boost::asio::io_service& io,
+                             const std::string& sensorName,
+                             sdbusplus::asio::object_server& objectServer,
+                             uint16_t sensorId,
+                             const std::string& sensorTypeName,
+                             const std::string& sensorUnit
+                             ) :
+    StateSensor(boost::replace_all_copy(sensorName, " ", "_"),
+           conn),
+    sensorId(sensorId),
+    objectServer(objectServer), dbusConnection(conn), waitTimer(io),
+    sensorName(sensorName), sensorTypeName(sensorTypeName)
+{
+    dbusPath = statesensorPathPrefix + sensorTypeName + "/" + name;
+
+    stateSensorInterface = objectServer.add_interface(dbusPath, sensorStateInterface);
+    stateSensorInterface->register_property("sensorId", sensorId);
+
+    stateSensorInterface->register_property("sensorOperationalState",std::numeric_limits<uint8_t>::quiet_NaN());
+    stateSensorInterface->register_property("present_state",std::numeric_limits<uint8_t>::quiet_NaN());
+    stateSensorInterface->register_property("previous_state",std::numeric_limits<uint8_t>::quiet_NaN());
+    stateSensorInterface->register_property("event_state",std::numeric_limits<uint8_t>::quiet_NaN());
+
+}
+
+PLDMStateSensor::~PLDMStateSensor()
+{
+    objectServer.remove_interface(stateSensorInterface);
+}
+
+void PLDMStateSensor::check_init_status(void)
+{
+    waitTimer.expires_from_now(boost::posix_time::seconds(5));
+    waitTimer.async_wait([&](const boost::system::error_code& ec) {
+        fprintf(stderr,"PLDMStateSensor::%s: check_init_status() time's up: cmd(%d),last_cmd(%d)\n",sensorName.c_str(), cmd, last_cmd);
+        if (ec == boost::asio::error::operation_aborted)
+        {
+            fprintf(stderr,"%s: we're being cancelled in check_init_status\n",sensorName.c_str());
+            return; // we're being cancelled
+        }
+        // read timer error
+        else if (ec)
+        {
+            fprintf(stderr,"%s: timer error check_init_status\n",sensorName.c_str());
+            return;
+        }
+
+        if( cmd == last_cmd )
+        {
+            //remove iter in InstanceID map
+            map<uint8_t, string>::iterator iter;
+            iter = instanceIDmap.find(instance_id);
+            if(iter != instanceIDmap.end())
+            {
+                auto sensorName_m = iter->second ;
+                if(sensorName_m.compare(sensorName)==0)
+                {
+                    instanceIDmap.erase(iter);
+                    if(debugP)
+                        fprintf(stderr,"%s: find instanceID %d in map, so erase it\n",sensorName.c_str(),instance_id);
+                }
+            }
+            init();
+        }
+        if( cmd != GetStateSensorReading )
+        {
+            fprintf(stderr,"PLDMStateSensor::%s: cmd(%d) is still not GetStateSensorReading, so keep check init status\n",sensorName.c_str(),cmd);
+            check_init_status();
+        }
+        else
+            fprintf(stderr,"PLDMStateSensor::%s: cmd(%d) is  GetStateSensorReading, so do not need to check init status\n",sensorName.c_str(),cmd);
+
+    });
+}
+
+void PLDMStateSensor::init(void)
+{
+    mutex_instanceID.lock();
+    instance_id = instance_id_g++;
+    if(debugP)
+        fprintf(stderr,"init():: %s : instance_id :%x sensorId:%x\n",sensorName.c_str(),instance_id,sensorId);
+
+    map<uint8_t, string>::iterator iter;
+    iter = instanceIDmap.find(instance_id);
+    if(iter != instanceIDmap.end())
+    {
+        auto sensorName_m = iter->second ;
+        instanceIDmap.erase(iter);
+        if(debugP)
+            fprintf(stderr,"%s: erase instance ID:%d for reusing in Init \n",sensorName_m.c_str(),instance_id);
+    }
+
+    instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
+
+    if(instance_id_g>0x1F)
+        instance_id_g=0;
+    mutex_instanceID.unlock();
+
+    if( cmd == SetStateSensorEnable )
+    {
+        if(debugP)
+            fprintf(stderr,"%s: In init::SetStateSensorEnable sensorId:%d instance_id:%d\n",sensorName.c_str(),sensorId,instance_id);
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
+
+        uint8_t sensorOperationalState = PLDM_SENSOR_ENABLED;
+        uint8_t sensorEventMessageEnable = PLDM_ENABLE_EVENTS;
+
+        auto [rc, requestMsg] = createSetStateSensorEnableRequestMsg(sensorId, sensorOperationalState, sensorEventMessageEnable);
+
+        if (rc != PLDM_SUCCESS)
+        {
+            std::cerr << "Failed to encode request message for SetStateSensorEnable" << " rc = " << rc << "\n";
+            return;
+        }
+
+        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+        auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+        method.append(dstEid, msgTag, true, requestMsg);
+        dbusConnection->call_noreply(method);
+        last_cmd = SetStateSensorEnable;
+        return;
+    }
+    else
+        fprintf(stderr,"%s: In init::unexpected cmd:%d\n",sensorName.c_str(),cmd);
+
+}
+
+void PLDMStateSensor::state_sensor_read_loop(void)
+{
+    static constexpr size_t pollTime = 1; // in seconds
+
+    waitTimer.expires_from_now(boost::posix_time::seconds(pollTime));
+    waitTimer.async_wait([this](const boost::system::error_code& ec) {
+
+        if(debugP)
+            fprintf(stderr,"%s: PLDMSensor::read : sensorId =%X\n",sensorName.c_str(),sensorId);
+
+        if (ec == boost::asio::error::operation_aborted)
+        {
+            fprintf(stderr,"%s: we're being cancelled sensor_read_loop\n",sensorName.c_str());
+            return; // we're being cancelled
+        }
+        // read timer error
+        else if (ec)
+        {
+            fprintf(stderr,"%s: timer error in sensor_read_loop\n",sensorName.c_str());
+            return;
+        }
+
+        std::string hostPath = "/xyz/openbmc_project/state/host0";
+        auto bus = sdbusplus::bus::new_default();
+        auto OSState =
+            getProperty(bus, hostPath, "xyz.openbmc_project.State.OperatingSystem.Status", "OperatingSystemState");
+        std::string workingState = "xyz.openbmc_project.State.OperatingSystem.Status.OSStatus." + powerState;
+
+        if( OSState.compare(workingState)==0 )//xyz.openbmc_project.State.OperatingSystem.Status.OSStatus.Standby
+
+        {
+            mutex_instanceID.lock();
+            instance_id = instance_id_g++;
+
+            map<uint8_t, string>::iterator iter;
+
+            iter = instanceIDmap.find(instance_id);
+            if(iter != instanceIDmap.end())
+            {
+                auto sensorName_m = iter->second ;
+                instanceIDmap.erase(iter);
+                if(debugP)
+                    fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
+            }
+
+            instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
+
+            if(instance_id_g>0x1F)
+                instance_id_g=0;
+            mutex_instanceID.unlock();
+
+            if( cmd == GetStateSensorReading )
+            {
+                uint8_t dstEid = 8;
+                uint8_t msgTag = 1;
+                auto [rc, requestMsg] = createGetStateSensorReadingRequestMsg(sensorId, rearmEventState);
+                if (rc != PLDM_SUCCESS)
+                {
+                    std::cerr << "Failed to encode request message for sensor reading" << " rc = " << rc << "\n";
+                    return;
+                }
+                requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+                auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                                  "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+                method.append(dstEid, msgTag, true, requestMsg);
+                dbusConnection->call_noreply(method);
+            }
+        }
+        state_sensor_read_loop();
+    });
+}
+
 
 PLDMSensor::PLDMSensor(std::shared_ptr<sdbusplus::asio::connection>& conn,
                              boost::asio::io_service& io,
@@ -118,10 +936,11 @@ PLDMSensor::PLDMSensor(std::shared_ptr<sdbusplus::asio::connection>& conn,
            objectType, PLDMMaxReading,
            PLDMMinReading, conn),
     sensorId(sensorId), sensorFactor(factor),
-    objectServer(objectServer), dbusConnection(conn), waitTimer(io), sensorName(sensorName)
+    objectServer(objectServer), dbusConnection(conn), waitTimer(io),
+    sensorName(sensorName), sensorTypeName(sensorTypeName)
 {
     std::string dbusPath = sensorPathPrefix + sensorTypeName + "/" + name;
-    sensorInterface = objectServer.add_interface(dbusPath, "xyz.openbmc_project.Sensor.Value");
+    sensorInterface = objectServer.add_interface(dbusPath, sensorValueInterface);
 
     std::string UnitPath = "xyz.openbmc_project.Sensor.Value.Unit." + sensorUnit;
     sensorInterface->register_property("Unit", UnitPath );
@@ -143,6 +962,7 @@ PLDMSensor::PLDMSensor(std::shared_ptr<sdbusplus::asio::connection>& conn,
     association = objectServer.add_interface(
         dbusPath,
         association::interface);
+
 }
 
 PLDMSensor::~PLDMSensor()
@@ -158,7 +978,7 @@ void PLDMSensor::check_init_status(void)
 {
     waitTimer.expires_from_now(boost::posix_time::seconds(5));
     waitTimer.async_wait([&](const boost::system::error_code& ec) {
-        fprintf(stderr,"%s: check_init_status() time's up: cmd(%d),last_cmd(%d)\n",sensorName.c_str(), cmd, last_cmd);
+        fprintf(stderr,"PLDMSensor::%s: check_init_status() time's up: cmd(%d),last_cmd(%d)\n",sensorName.c_str(), cmd, last_cmd);
         if (ec == boost::asio::error::operation_aborted)
         {
             fprintf(stderr,"%s: we're being cancelled in check_init_status\n",sensorName.c_str());
@@ -190,204 +1010,160 @@ void PLDMSensor::check_init_status(void)
         }
         if( cmd != GetSensorReading )
         {
-            fprintf(stderr,"%s: cmd(%d) is still not GetSensorReading, so keep check init status\n",sensorName.c_str(),cmd);
+            fprintf(stderr,"PLDMSensor::%s: cmd(%d) is still not GetSensorReading, so keep check init status\n",sensorName.c_str(),cmd);
             check_init_status();
         }
         else
-            fprintf(stderr,"%s: cmd(%d) is  GetSensorReading, so do not need to check init status\n",sensorName.c_str(),cmd);
+            fprintf(stderr,"PLDMSensor::%s: cmd(%d) is  GetSensorReading, so do not need to check init status\n",sensorName.c_str(),cmd);
 
     });
-
 }
+
 void PLDMSensor::init(void)
 {
-        mutex_instanceID.lock();
-        instance_id = instance_id_g++;
+    mutex_instanceID.lock();
+    instance_id = instance_id_g++;
+    if(debugP)
+        fprintf(stderr,"%s: In init::instance_id :%x sensorId:%x sensorDataSize:%x\n",sensorName.c_str(),instance_id,sensorId,sensorDataSize);
+
+    map<uint8_t, string>::iterator iter;
+    iter = instanceIDmap.find(instance_id);
+    if(iter != instanceIDmap.end())
+    {
+        auto sensorName_m = iter->second ;
+        instanceIDmap.erase(iter);
         if(debugP)
-            fprintf(stderr,"%s: In init::instance_id :%x sensorId:%x sensorDataSize:%x\n",sensorName.c_str(),instance_id,sensorId,sensorDataSize);
+            fprintf(stderr,"%s: erase instance ID:%d for reusing in Init \n",sensorName_m.c_str(),instance_id);
+    }
 
-        map<uint8_t, string>::iterator iter;
-        iter = instanceIDmap.find(instance_id);
-        if(iter != instanceIDmap.end())
+    instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
+
+    if(instance_id_g>0x1F)
+        instance_id_g=0;
+    mutex_instanceID.unlock();
+
+    if( cmd == SetNumericSensorEnable )
+    {
+        if(debugP)
+            fprintf(stderr,"%s: In init::SetNumericSensorEnable sensorId:%d instance_id:%d\n",sensorName.c_str(),sensorId,instance_id);
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
+        uint8_t sensor_operational_state = 0x0;
+        uint8_t sensor_event_message_enable = 0x0;
+        auto [rc, requestMsg] = createSetNumericSensorEnableRequestMsg(sensorId, sensor_operational_state, sensor_event_message_enable);
+        if (rc != PLDM_SUCCESS)
         {
-            auto sensorName_m = iter->second ;
-            instanceIDmap.erase(iter);
-            if(debugP)
-                fprintf(stderr,"%s: erase instance ID:%d for reusing in Init \n",sensorName_m.c_str(),instance_id);
-        }
-
-        instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
-
-        if(instance_id_g>0x1F)
-            instance_id_g=0;
-        mutex_instanceID.unlock();
-
-        if( cmd == SetNumericSensorEnable )
-        {
-            if(debugP)
-                fprintf(stderr,"%s: In init::SetNumericSensorEnable sensorId:%d instance_id:%d\n",sensorName.c_str(),sensorId,instance_id);
-            uint8_t dstEid = 8;
-            uint8_t msgTag = 1;
-            uint8_t sensor_operational_state = 0x0;
-            uint8_t sensor_event_message_enable = 0x0;
-            auto [rc, requestMsg] = createSetNumericSensorEnableRequestMsg(sensorId, sensor_operational_state, sensor_event_message_enable);
-            if (rc != PLDM_SUCCESS)
-            {
-                std::cerr << "Failed to encode request message for SetNumericSensorEnable" << " rc = " << rc << "\n";
-                return;
-            }
-
-            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-
-            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
-                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-            method.append(dstEid, msgTag, true, requestMsg);
-            dbusConnection->call_noreply(method);
-            last_cmd = SetNumericSensorEnable;
+            std::cerr << "Failed to encode request message for SetNumericSensorEnable" << " rc = " << rc << "\n";
             return;
         }
-        else if( cmd == SetSensorThresholds )
+
+        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+        auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+        method.append(dstEid, msgTag, true, requestMsg);
+        dbusConnection->call_noreply(method);
+        last_cmd = SetNumericSensorEnable;
+        return;
+    }
+    else if( cmd == SetSensorThresholds )
+    {
+        if(debugP)
+            fprintf(stderr,"%s: In init::SetSensorThresholds sensorDataSize:%x\n",sensorName.c_str(),sensorDataSize);
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
+        auto [rc, requestMsg] = createSetSensorThresholdRequestMsg(sensorId, sensorDataSize, THRESHOLDs_val_sensor);
+        if (rc != PLDM_SUCCESS)
         {
-            if(debugP)
-                fprintf(stderr,"%s: In init::SetSensorThresholds sensorDataSize:%x\n",sensorName.c_str(),sensorDataSize);
-            uint8_t dstEid = 8;
-            uint8_t msgTag = 1;
-            auto [rc, requestMsg] = createSetSensorThresholdRequestMsg(sensorId, sensorDataSize, THRESHOLDs_val_sensor);
-            if (rc != PLDM_SUCCESS)
-            {
-                std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
-                return;
-            }
-
-            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-
-            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
-                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-            method.append(dstEid, msgTag, true, requestMsg);
-            dbusConnection->call_noreply(method);
-            last_cmd = SetSensorThresholds;
+            std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
             return;
         }
-        else if( cmd == GetSensorThresholds)
+
+        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+        auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+        method.append(dstEid, msgTag, true, requestMsg);
+        dbusConnection->call_noreply(method);
+        last_cmd = SetSensorThresholds;
+        return;
+    }
+    else if( cmd == GetSensorThresholds)
+    {
+        if(debugP)
+            fprintf(stderr,"%s: In init::GetSensorThresholds\n",sensorName.c_str());
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
+
+        auto [rc, requestMsg] = createGetSensorThresholdRequestMsg(sensorId);
+        if (rc != PLDM_SUCCESS)
         {
-            if(debugP)
-                fprintf(stderr,"%s: In init::GetSensorThresholds\n",sensorName.c_str());
-            uint8_t dstEid = 8;
-            uint8_t msgTag = 1;
-
-            auto [rc, requestMsg] = createGetSensorThresholdRequestMsg(sensorId);
-            if (rc != PLDM_SUCCESS)
-            {
-                std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
-                return;
-            }
-
-            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-
-            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
-                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-            method.append(dstEid, msgTag, true, requestMsg);
-            dbusConnection->call_noreply(method);
-            last_cmd = GetSensorThresholds;
-            return;
-        }//sensor->hysteresis
-        else if( cmd == SetSensorHysteresis )
-        {
-            if(debugP)
-                fprintf(stderr,"%s: In init::SetSensorHysteresis: sensorDataSize:%x hysteresis:%d\n",sensorName.c_str(),sensorDataSize, hysteresis);
-            uint8_t dstEid = 8;
-            uint8_t msgTag = 1;
-            auto [rc, requestMsg] = createSetSensorHysteresisRequestMsg(sensorId, sensorDataSize, hysteresis);
-            if (rc != PLDM_SUCCESS)
-            {
-                std::cerr << "Failed to encode request message for SetSensorHysteresis" << " rc = " << rc << "\n";
-                return;
-            }
-
-            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-
-            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
-                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-            method.append(dstEid, msgTag, true, requestMsg);
-            dbusConnection->call_noreply(method);
-            last_cmd = SetSensorHysteresis;
+            std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
             return;
         }
-        else if( cmd == GetSensorHysteresis)
+
+        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+        auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+        method.append(dstEid, msgTag, true, requestMsg);
+        dbusConnection->call_noreply(method);
+        last_cmd = GetSensorThresholds;
+        return;
+    }//sensor->hysteresis
+    else if( cmd == SetSensorHysteresis )
+    {
+        if(debugP)
+            fprintf(stderr,"%s: In init::SetSensorHysteresis: sensorDataSize:%x hysteresis:%d\n",sensorName.c_str(),sensorDataSize, hysteresis);
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
+        auto [rc, requestMsg] = createSetSensorHysteresisRequestMsg(sensorId, sensorDataSize, hysteresis);
+        if (rc != PLDM_SUCCESS)
         {
-            if(debugP)
-                fprintf(stderr,"%s: In init::GetSensorHysteresis\n",sensorName.c_str());
-            uint8_t dstEid = 8;
-            uint8_t msgTag = 1;
-
-            auto [rc, requestMsg] = createGetSensorHysteresisRequestMsg(sensorId);
-            if (rc != PLDM_SUCCESS)
-            {
-                std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
-                return;
-            }
-
-            requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
-
-            auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
-                                              "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
-            method.append(dstEid, msgTag, true, requestMsg);
-            dbusConnection->call_noreply(method);
-            last_cmd = GetSensorHysteresis;
+            std::cerr << "Failed to encode request message for SetSensorHysteresis" << " rc = " << rc << "\n";
             return;
         }
-        else
-            fprintf(stderr,"%s: In init::unexpected cmd:%d\n",sensorName.c_str(),cmd);
+
+        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+        auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+        method.append(dstEid, msgTag, true, requestMsg);
+        dbusConnection->call_noreply(method);
+        last_cmd = SetSensorHysteresis;
+        return;
+    }
+    else if( cmd == GetSensorHysteresis)
+    {
+        if(debugP)
+            fprintf(stderr,"%s: In init::GetSensorHysteresis\n",sensorName.c_str());
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
+
+        auto [rc, requestMsg] = createGetSensorHysteresisRequestMsg(sensorId);
+        if (rc != PLDM_SUCCESS)
+        {
+            std::cerr << "Failed to encode request message for SetSensorThresholds" << " rc = " << rc << "\n";
+            return;
+        }
+
+        requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+
+        auto method = dbusConnection->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                          "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+        method.append(dstEid, msgTag, true, requestMsg);
+        dbusConnection->call_noreply(method);
+        last_cmd = GetSensorHysteresis;
+        return;
+    }
+    else
+        fprintf(stderr,"%s: In init::unexpected cmd:%d\n",sensorName.c_str(),cmd);
 
 }
 
 void PLDMSensor::checkThresholds(void)
 {
     thresholds::checkThresholds(this);
-}
-
-std::string getService(sdbusplus::bus::bus& bus, std::string path,
-                       std::string interface)
-{
-    auto mapper = bus.new_method_call(MAPPER_BUSNAME, MAPPER_PATH,
-                                      MAPPER_INTERFACE, "GetObject");
-
-    mapper.append(path, std::vector<std::string>({interface}));
-
-    std::map<std::string, std::vector<std::string>> mapperResponse;
-
-    auto mapperResponseMsg = bus.call(mapper);
-
-    mapperResponseMsg.read(mapperResponse);
-    if (mapperResponse.empty())
-    {
-        fprintf(stderr,"Error reading mapper response PATH=%s INTERFACE=%s", path.c_str(), interface.c_str());
-        throw std::runtime_error("Error reading mapper response");
-    }
-
-    return mapperResponse.begin()->first;
-}
-
-std::string getProperty(sdbusplus::bus::bus& bus, std::string path,
-                        std::string interface, std::string propertyName)
-{
-    std::variant<std::string> property;
-    std::string service = getService(bus, path, interface);
-
-    auto method = bus.new_method_call(service.c_str(), path.c_str(),
-                                      PROPERTY_INTERFACE, "Get");
-
-    method.append(interface, propertyName);
-    auto reply = bus.call(method);
-    reply.read(property);
-
-    if (std::get<std::string>(property).empty())
-    {
-        fprintf(stderr,"Error reading property response %s\n", propertyName.c_str());
-        throw std::runtime_error("Error reading property response");
-    }
-
-    return std::get<std::string>(property);
 }
 
 void PLDMSensor::sensor_read_loop(void)
@@ -432,7 +1208,6 @@ void PLDMSensor::sensor_read_loop(void)
                 instanceIDmap.erase(iter);
                 if(debugP)
                     fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",sensorName_m.c_str(),instance_id);
-
             }
 
             instanceIDmap.insert(pair<uint8_t, string>(instance_id, sensorName));
@@ -466,29 +1241,14 @@ void createSensors(
     boost::asio::io_service& io, sdbusplus::asio::object_server& objectServer,
     boost::container::flat_map<std::string, std::unique_ptr<PLDMSensor>>&
         sensors,
-    std::shared_ptr<sdbusplus::asio::connection>& dbusConnection)
+    std::shared_ptr<sdbusplus::asio::connection>& dbusConnection,
+    Json data)
 {
     if (!dbusConnection)
     {
         std::cerr << "Connection not created\n";
         return;
     }
-    const std::string pldmsensors_config = "/etc/default/pldmsensors.json";
-    std::ifstream jsonFile(pldmsensors_config);
-    if (!jsonFile.is_open())
-    {
-        printf("pldmsensor config file does not exist, FILE=%s\n",pldmsensors_config.c_str());
-        return;
-    }
-
-    auto data = Json::parse(jsonFile, nullptr, false);
-    if (data.is_discarded())
-    {
-        printf("Parsing config file failed\n");
-        return;
-    }
-
-    jsonFile.close();
 
     for (const auto& record : data)
     {
@@ -609,15 +1369,286 @@ void createSensors(
     return;
 }
 
+void createStateSensors(
+    boost::asio::io_service& io, sdbusplus::asio::object_server& objectServer,
+    boost::container::flat_map<std::string, std::unique_ptr<PLDMStateSensor>>&
+        state_sensors,
+    std::shared_ptr<sdbusplus::asio::connection>& dbusConnection,
+    Json data)
+{
+    if (!dbusConnection)
+    {
+        std::cerr << "Connection not created\n";
+        return;
+    }
+
+    for (const auto& record : data)
+    {
+        uint16_t sensorId;
+        std::string sensorTypeName;
+        std::string sensorName;
+        std::string sensorUnit;
+        std::string powerState;
+        uint8_t rearmEventState;
+
+
+        constexpr auto sensorID_json = "sensorID";
+        constexpr auto sensorTypeName_json = "sensorTypeName";
+        constexpr auto sensorName_json = "sensorName";
+        constexpr auto sensorUnit_json = "sensorUnit";
+
+        constexpr auto rearmEventState_json = "rearmEventState";
+        constexpr auto powerState_json = "powerState";
+
+
+        sensorId = static_cast<uint16_t>(record.value(sensorID_json, 0));
+        sensorTypeName = record.value(sensorTypeName_json, "");
+        sensorName = record.value(sensorName_json, "");
+        sensorUnit = record.value(sensorUnit_json, "");
+        powerState = record.value(powerState_json, "");
+        rearmEventState = static_cast<uint8_t>(record.value(rearmEventState_json, 0));
+
+        auto& sensor = state_sensors[sensorName];
+
+        sensor = std::make_unique<PLDMStateSensor>(
+        dbusConnection, io, sensorName, objectServer,
+        sensorId, sensorTypeName, sensorUnit);
+
+        sensor->powerState = powerState;
+
+        sensor->rearmEventState.byte = rearmEventState;
+
+        sensor->setInitialProperties(dbusConnection);
+
+        sensor->cmd = SetStateSensorEnable;
+        sensor->init();
+        sensor->check_init_status();
+    }
+    return;
+}
+
+void createEffecters(
+    boost::asio::io_service& io, sdbusplus::asio::object_server& objectServer,
+    boost::container::flat_map<std::string, std::unique_ptr<PLDMEffecter>>&
+        effecters,
+    std::shared_ptr<sdbusplus::asio::connection>& dbusConnection,
+    Json data)
+{
+    if (!dbusConnection)
+    {
+        std::cerr << "Connection not created\n";
+        return;
+    }
+
+    for (const auto& record : data)
+    {
+        uint16_t effecterId;
+        std::string effecterTypeName;
+        std::string effecterName;
+        std::string effecterUnit;
+        std::string powerState;
+        std::string effecterDataSize;
+        std::string effecterState1;
+        std::string effecterState2;
+
+        constexpr auto effecterId_json = "effecterID";
+        constexpr auto effecterTypeName_json = "effecterTypeName";
+        constexpr auto effecterName_json = "effecterName";
+        constexpr auto effecterUnit_json = "effecterUnit";
+        constexpr auto effecterDataSize_json = "effecterDataSize";
+        constexpr auto powerState_json = "powerState";
+        constexpr auto effecterState1_json = "effecterstate1";
+        constexpr auto effecterState2_json = "effecterstate2";
+
+        effecterId = static_cast<uint16_t>(record.value(effecterId_json, 0));
+        effecterTypeName = record.value(effecterTypeName_json, "");
+        effecterName = record.value(effecterName_json, "");
+        effecterUnit = record.value(effecterUnit_json, "");
+        effecterDataSize = record.value(effecterDataSize_json, "");
+        effecterState1 = record.value(effecterState1_json, "");
+        effecterState2 = record.value(effecterState2_json, "");
+        powerState = record.value(powerState_json, "");
+
+        auto& effecter = effecters[effecterName];
+
+        effecter = std::make_unique<PLDMEffecter>(
+        dbusConnection, io, effecterName, objectServer,
+        effecterId, effecterTypeName, effecterUnit);
+
+        effecter->powerState = powerState;
+        effecter->effecterstate1 = effecterState1;
+        effecter->effecterstate2 = effecterState2;
+        effecter->setInitialProperties(dbusConnection);
+        effecter->init();
+    }
+    return;
+}
+
+void createNumericEffecters(
+    boost::asio::io_service& io, sdbusplus::asio::object_server& objectServer,
+    boost::container::flat_map<std::string, std::unique_ptr<PLDMNumericEffecter>>&
+        numeric_effecters,
+    std::shared_ptr<sdbusplus::asio::connection>& dbusConnection,
+    Json data)
+{
+    if (!dbusConnection)
+    {
+        std::cerr << "Connection not created\n";
+        return;
+    }
+
+    for (const auto& record : data)
+    {
+        uint16_t effecterId;
+        std::string effecterTypeName;
+        std::string effecterName;
+        std::string effecterUnit;
+        std::string powerState;
+        std::string effecterDataSize;
+
+        constexpr auto effecterId_json = "effecterID";
+        constexpr auto effecterTypeName_json = "effecterTypeName";
+        constexpr auto effecterName_json = "effecterName";
+        constexpr auto effecterUnit_json = "effecterUnit";
+        constexpr auto effecterDataSize_json = "effecterDataSize";
+        constexpr auto powerState_json = "powerState";
+
+        effecterId = static_cast<uint16_t>(record.value(effecterId_json, 0));
+        effecterTypeName = record.value(effecterTypeName_json, "");
+        effecterName = record.value(effecterName_json, "");
+        effecterUnit = record.value(effecterUnit_json, "");
+        effecterDataSize = record.value(effecterDataSize_json, "");
+        powerState = record.value(powerState_json, "");
+
+        auto& effecter = numeric_effecters[effecterName];
+
+        effecter = std::make_unique<PLDMNumericEffecter>(
+        dbusConnection, io, effecterName, objectServer,
+        effecterId, effecterTypeName, effecterUnit);
+
+        effecter->setInitialProperties(dbusConnection);
+
+        effecter->powerState = powerState;
+
+        if( effecterDataSize.compare("UINT8") == 0)
+            effecter->effecterDataSize = PLDM_EFFECTER_DATA_SIZE_UINT8;
+        else if( effecterDataSize.compare("SINT8") == 0)
+            effecter->effecterDataSize = PLDM_EFFECTER_DATA_SIZE_SINT8;
+        else if( effecterDataSize.compare("UINT16") == 0)
+            effecter->effecterDataSize = PLDM_EFFECTER_DATA_SIZE_UINT16;
+        else if( effecterDataSize.compare("SINT16") == 0)
+            effecter->effecterDataSize = PLDM_EFFECTER_DATA_SIZE_SINT16;
+        else if( effecterDataSize.compare("UINT32") == 0)
+            effecter->effecterDataSize = PLDM_EFFECTER_DATA_SIZE_UINT32;
+        else if( effecterDataSize.compare("SINT32") == 0)
+            effecter->effecterDataSize = PLDM_EFFECTER_DATA_SIZE_SINT32;
+        else
+            effecter->effecterDataSize = -1;
+
+        effecter->init();
+
+    }
+    return;
+}
+
+void create_sensor_effecter(
+    sdbusplus::asio::object_server& objectServer)
+{
+    const std::string pldm_node_configPath = "/etc/default/pldm.json";
+    std::ifstream jsonFile(pldm_node_configPath);
+    if (!jsonFile.is_open())
+    {
+        fprintf(stderr," PLDM config file(%s) doesn't exist!!\n",pldm_node_configPath.c_str());
+        return;
+    }
+
+    Json jsonConfig = Json::parse(jsonFile, nullptr, false);
+
+    if (jsonConfig.size() == 0 )
+    {
+        fprintf(stderr," PLDM config file(%s) size is 0!!\n",pldm_node_configPath.c_str());
+        return;
+    }
+
+    if ( jsonConfig.contains("numeric_sensor") )
+    {
+        fprintf(stderr,"Find numeric_sensor in pldm.json file\n");
+        createSensors(io, objectServer, sensors, systemBus, jsonConfig.at("numeric_sensor"));
+            if (sensors.empty())
+            {
+                std::cout << "numeric_sensor not detected\n";
+            }
+            else
+            {
+                fprintf(stderr,"Create numeric_sensor successfully\n");
+                last_pldm_state = pldm_state = OPER_SENSORS;
+            }
+    }
+    else
+        fprintf(stderr,"No numeric_sensor in pldm.json file\n");
+
+    if ( jsonConfig.contains("state_sensor") )
+    {
+        fprintf(stderr,"Find state_sensor in pldm.json file\n");
+        createStateSensors(io, objectServer, state_sensors, systemBus, jsonConfig.at("state_sensor"));
+            if (state_sensors.empty())
+            {
+                std::cout << "state_sensor not detected\n";
+            }
+            else
+            {
+                fprintf(stderr,"Create state_sensor successfully\n");
+                last_pldm_state = pldm_state = OPER_SENSORS;
+            }
+    }
+    else
+        fprintf(stderr,"No state_sensor in pldm.json file\n");
+
+    if ( jsonConfig.contains("state_effecter") )
+    {
+        fprintf(stderr,"Find state_effecter in pldm.json file\n");
+        createEffecters(io, objectServer, effecters, systemBus, jsonConfig.at("state_effecter"));
+        if (effecters.empty())
+        {
+            std::cout << "state_effecter Configuration not detected\n";
+        }
+        else
+        {
+            fprintf(stderr,"Create state_effecter successfully\n");
+            last_pldm_state = pldm_state = OPER_SENSORS;
+        }
+    }
+    else
+        fprintf(stderr,"No state_effecter in pldm.json file\n");
+
+    if ( jsonConfig.contains("numeric_effecter") )
+    {
+        fprintf(stderr,"Find numeric_effecter in pldm.json file\n");
+        createNumericEffecters(io, objectServer, numeric_effecters, systemBus, jsonConfig.at("numeric_effecter"));
+        if (numeric_effecters.empty())
+        {
+            std::cout << "numeric_effecter Configuration not detected\n";
+        }
+        else
+        {
+            fprintf(stderr,"Create numeric_effecter successfully\n");
+            last_pldm_state = pldm_state = OPER_SENSORS;
+        }
+    }
+    else
+        fprintf(stderr,"No numeric_effecter in pldm.json file\n");
+
+    return;
+}
+
 void check_pldm_device_status(void)
 {
-    uint8_t TID = 2;
-    uint8_t dstEid = 8;
-    uint8_t msgTag = 1;
-
     pldmdeviceTimer->expires_from_now(boost::posix_time::seconds(5));
     // create a timer because normally multiple properties change
     pldmdeviceTimer->async_wait([&](const boost::system::error_code& ec) {
+        uint8_t TID = 2;
+        uint8_t dstEid = 8;
+        uint8_t msgTag = 1;
         if (ec == boost::asio::error::operation_aborted)
         {
             std::cerr << "check_pldm_device_status(): we're being cancelled\n";
@@ -629,36 +1660,6 @@ void check_pldm_device_status(void)
             std::cerr << "check_pldm_device_status(): timer error\n";
             return;
         }
-        std::string i2cBus = "/dev/i2c-2";
-
-        int outFd = open(i2cBus.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
-
-        constexpr uint8_t Addr = 0x71;
-
-        if (outFd < 0)
-        {
-            if(debugP)
-                fprintf(stderr,"Open %s fail...\n",i2cBus.c_str());
-            return;
-        }
-
-        if ( (ioctl(outFd, I2C_SLAVE, Addr) < 0)  && (pldm_state < OPER_SENSORS ))
-        {
-            // busy slave
-            if(debugP)
-                fprintf(stderr,"PLDM device is not ready or busy...\n");
-            check_pldm_device_status();
-            return;
-        }
-        else if ( (i2c_smbus_read_byte(outFd) < 0) && (pldm_state < OPER_SENSORS ))
-        {
-            // no device
-            if(debugP)
-                fprintf(stderr,"PLDM device doesn't exist...\n");
-            check_pldm_device_status();
-            return;
-        }
-        fprintf(stderr,"PLDM device %02X exists\n",Addr);
 
         fprintf(stderr,"check_pldm_device_status() time's up (pldm_state:%d)(last_pldm_state:%d)\n",pldm_state, last_pldm_state);
 
@@ -678,7 +1679,7 @@ void check_pldm_device_status(void)
             }
             if( last_pldm_state == SET_TID)
             {
-                fprintf(stderr,"resend SET_TID command\n");
+                fprintf(stderr,"resend SET_TID command(dstEid:%d)\n",dstEid);
                 auto [rc, requestMsg] = createSetTIDRequestMsg(TID);
                 if (rc != PLDM_SUCCESS)
                 {
@@ -696,7 +1697,7 @@ void check_pldm_device_status(void)
             }
             else if( last_pldm_state == GET_TID)
             {
-                fprintf(stderr,"resend GET_TID command\n");
+                fprintf(stderr,"resend GET_TID command(dstEid:%d)\n",dstEid);
                 auto [rc, requestMsg] = createGetTIDRequestMsg();
                 if (rc != PLDM_SUCCESS)
                 {
@@ -714,7 +1715,7 @@ void check_pldm_device_status(void)
             }
             else if( last_pldm_state == GET_TYPE)
             {
-                fprintf(stderr,"resend GET_TYPE command\n");
+                fprintf(stderr,"resend GET_TYPE command(dstEid:%d)\n",dstEid);
                 auto [rc, requestMsg] = createGetTypeRequestMsg();
                 if (rc != PLDM_SUCCESS)
                 {
@@ -875,98 +1876,398 @@ int main(void)
                         else
                             fprintf(stderr,"This PLDM device supports PLDM_PLATFORM\n");
 
-                        createSensors(io, objectServer, sensors, systemBus);
-                        if (sensors.empty())
-                        {
-                            std::cout << "Configuration not detected\n";
-                        }
-                        else
-                        {
-                            fprintf(stderr,"Create Sensors successfully\n");
-                            last_pldm_state = pldm_state = OPER_SENSORS;
-                        }
+                        //Read pldm sensor effecter config file
+                        create_sensor_effecter(objectServer);
                         return;
                     }
                     else if (pldm_state == OPER_SENSORS)
                     {
-                        auto& sensor = sensors[sensorName];
-                        if(debugP)
-                            fprintf(stderr,"%s: Resp instance_id:%x sensor->cmd:%d\n",sensor->sensorName.c_str(),instance_id,sensor->cmd);
-                        if(sensor->cmd == GetSensorReading)
+                        /* State Effecter
+                         *    PLDM_SET_STATE_EFFECTER_ENABLE = 0x38,
+                         *    PLDM_SET_STATE_EFFECTER_STATES = 0x39,
+                         *    PLDM_GET_STATE_EFFECTER_STATES = 0x3A,
+                         */
+                        if( resphdr->command>=PLDM_SET_STATE_EFFECTER_ENABLE && resphdr->command<=PLDM_GET_STATE_EFFECTER_STATES )
                         {
-                            double PRESENT_val;
-                            if(parseSensorReadingResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &PRESENT_val)<0)
+                            auto& effecter = effecters[sensorName];
+                            if(!effecter)
                             {
-                                fprintf(stderr,"%s: Parse SensorReading Response Fail\n",sensor->sensorName.c_str());
+                                fprintf(stderr,"got STATE_EFFECTER Response, but STATE_EFFECTER is not ready\n");
                                 return;
                             }
-                            PRESENT_val = PRESENT_val*sensor->sensorFactor;
-                            sensor->updateValue(PRESENT_val);
-                        }
-                        else if(sensor->cmd == SetNumericSensorEnable)
-                        {
-                            if(parseSetNumericSensorEnableResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
-                                fprintf(stderr,"%s: Parse SetNumericSensorEnable Response Fail\n",sensor->sensorName.c_str());
-                            else
-                                sensor->cmd = SetSensorThresholds;
-                            sensor->init();
-                        }
-                        else if(sensor->cmd == SetSensorThresholds)
-                        {
-                            if(parseSetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
-                                fprintf(stderr,"%s: Parse SetSensorThresholds Response Fail\n",sensor->sensorName.c_str());
-                            else
+                            if( resphdr->command == PLDM_SET_STATE_EFFECTER_STATES )
                             {
-                                sensor->cmd = GetSensorThresholds;
-                                fprintf(stderr,"%s: SetSensorThresholds successfully\n",sensor->sensorName.c_str());
-                            }
-                            sensor->init();
-                        }
-                        else if(sensor->cmd == GetSensorThresholds)
-                        {
-                           int THRESHOLDs_val[6];
-                           parseGetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, THRESHOLDs_val );
-
-                            for(int i=0 ; i<6 ; i++)
-                                if(sensor->THRESHOLDs_val_sensor[i] != THRESHOLDs_val[i])
+                                if(parseSetEffecterStateResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
                                 {
-                                   fprintf(stderr,"%s: Compare sensor threshold fail\n",sensor->sensorName.c_str());
-                                   sensor->init();
-                                   return;
+                                    uint8_t CC = 0x1;
+                                    fprintf(stderr,"%s: Parse SetEffecterState Response Fail\n",effecter->effecterName.c_str());
+                                    effecter->effecterInterface->set_property("completeionCode", CC);
+                                    return;
                                 }
-                            fprintf(stderr,"%s: Compare sensor threshold successfully, and then SetSensorHysteresis\n",sensor->sensorName.c_str());
-                            sensor->cmd = SetSensorHysteresis;
-                            sensor->init();
-                        }
-                        else if(sensor->cmd == SetSensorHysteresis)
-                        {
-                            fprintf(stderr,"%s: Response of SetSensorHysteresis\n",sensor->sensorName.c_str());
-                            if(parseSetSensorHysteresisResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
-                                fprintf(stderr,"%s: Parse SetSensorHysteresis Response Fail\n",sensor->sensorName.c_str());
-                            else
-                            {
-                                fprintf(stderr,"%s: SetSensorHysteresis successfully\n",sensor->sensorName.c_str());
-                                sensor->cmd = GetSensorHysteresis;
+                                else
+                                {
+                                    fprintf(stderr,"Parse Response of SET_STATE_EFFECTER_STATES successfully [%s]\n", effecter->effecterName.c_str());
+                                    uint8_t CC = 0x0;
+                                    effecter->effecterInterface->set_property("completeionCode", CC);
+
+                                    //Send GetEffecterState--Start
+                                    uint8_t dstEid = 8;
+                                    uint8_t msgTag = 1;
+                                    uint8_t instance_id = 0;
+                                    uint8_t compEffecterCnt = 0x1;
+
+                                    //Get instanceID for PLDM msg--start
+                                    mutex_instanceID.lock();
+                                    instance_id = instance_id_g++;
+
+                                    map<uint8_t, string>::iterator iter;
+
+                                    iter = instanceIDmap.find(instance_id);
+                                    if(iter != instanceIDmap.end())
+                                    {
+                                        auto effecterName_m = iter->second ;
+                                        instanceIDmap.erase(iter);
+                                        if(debugP)
+                                            fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",effecterName_m.c_str(),instance_id);
+                                    }
+
+                                    instanceIDmap.insert(pair<uint8_t, string>(instance_id, effecter->effecterName));
+
+                                    if(instance_id_g>0x1F)
+                                        instance_id_g=0;
+                                    mutex_instanceID.unlock();
+                                    //Get instanceID for PLDM msg--End
+
+                                    std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 2);
+                                    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+                                    auto rc = encode_get_state_effecter_states_req( instance_id, effecter->effecterId, request);
+
+                                    if (rc != PLDM_SUCCESS)
+                                    {
+                                        std::cerr << "Failed to encode request message for state effect reading" << " rc = " << rc << "\n";
+                                        return;
+                                    }
+                                    requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+                                    auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                                                      "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+                                    method.append(dstEid, msgTag, true, requestMsg);
+                                    systemBus->call_noreply(method);
+                                    //Resend GetEffecterState--End
+                                }
                             }
-                            sensor->init();
-                        }
-                       else if(sensor->cmd == GetSensorHysteresis)
-                       {
-                           fprintf(stderr,"%s: Response of GetSensorHysteresis\n",sensor->sensorName.c_str());
-                           int Hysteresis_val;
-                           parseGetSensorHysteresisResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &Hysteresis_val );
-                           fprintf(stderr,"%s: Hysteresis_val:%d\n",sensorName.c_str(),Hysteresis_val);
-                            if(sensor->hysteresis != Hysteresis_val)
+                            else if( resphdr->command == PLDM_GET_STATE_EFFECTER_STATES )
                             {
-                                fprintf(stderr,"%s: Compare sensor hysteresis fail\n",sensor->sensorName.c_str());
+                                uint8_t retcomp_sensorCnt=1;
+                                get_sensor_state_field retstateField[8];
+                                if(parseGetEffecterStateResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, retcomp_sensorCnt, retstateField)<0)
+                                {
+                                    uint8_t CC = 0x1;
+                                    fprintf(stderr,"%s: Parse GetEffecterState Response Fail\n",effecter->effecterName.c_str());
+                                    effecter->effecterInterface->set_property("completeionCode", CC);
+                                    return;
+                                }
+                                else
+                                {
+                                    fprintf(stderr,"Parse response of GetEffecterState Successfully [%s]\n", effecter->effecterName.c_str());
+                                    for(int i=0; i<retcomp_sensorCnt; i++)
+                                    {
+                                        effecter->effecterInterface->set_property("effecterOperationalState", retstateField[i].sensor_op_state);
+                                        effecter->effecterInterface->set_property("present_state", retstateField[i].present_state);
+                                        effecter->effecterInterface->set_property("previous_state", retstateField[i].previous_state);
+                                        effecter->effecterInterface->set_property("event_state", retstateField[i].event_state);
+
+                                        if(debugP)
+                                        {
+                                            fprintf(stderr,"    %d:present_state :%x\n",i,retstateField[i].present_state);
+                                            fprintf(stderr,"    %d:previous_state:%x\n",i,retstateField[i].previous_state);
+                                            fprintf(stderr,"    %d:sensor_op_state:%x\n",i,retstateField[i].sensor_op_state);
+                                            fprintf(stderr,"    %d:event_state:%x\n",i,retstateField[i].event_state);
+                                        }
+                                    }
+                                    uint8_t CC = 0x0;
+                                    effecter->effecterInterface->set_property("completeionCode", CC);
+                                    return;
+                                }
+                            }
+                        }
+                        /* Numeric Effecter
+                         *    PLDM Numeric Effecter commands
+                         *    PLDM_SET_NUMERIC_EFFECTER_ENABLE = 0x30,
+                         *    PLDM_SET_NUMERIC_EFFECTER_VALUE = 0x31,
+                         *    PLDM_GET_NUMERIC_EFFECTER_VALUE = 0x32,
+                         */
+                        else if( resphdr->command>=PLDM_SET_NUMERIC_EFFECTER_ENABLE && resphdr->command<=PLDM_GET_NUMERIC_EFFECTER_VALUE )
+                        {
+                            auto& effecter = numeric_effecters[sensorName];
+                            if(!effecter)
+                            {
+                                fprintf(stderr,"got NUMERIC_EFFECTER Response, but NUMERIC_EFFECTER is not ready\n");
+                                return;
+                            }
+                            if( resphdr->command == PLDM_SET_NUMERIC_EFFECTER_VALUE )
+                            {
+                                if(parseSetNumericEffecterResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                {
+                                    fprintf(stderr,"%s: Parse SetEffecterState Response Fail\n",effecter->effecterName.c_str());
+                                    return;
+                                }
+                                else
+                                {
+                                    //Send GetEffecterState--Start
+                                    uint8_t dstEid = 8;
+                                    uint8_t msgTag = 1;
+                                    uint8_t instance_id = 0;
+                                    uint8_t compEffecterCnt = 0x1;
+
+                                    fprintf(stderr,"Parse response of SET_NUMERIC_EFFECTER_VALUE successfully [%s]\n", effecter->effecterName.c_str());
+                                    //Get instanceID for PLDM msg--start
+                                    mutex_instanceID.lock();
+                                    instance_id = instance_id_g++;
+
+                                    map<uint8_t, string>::iterator iter;
+
+                                    iter = instanceIDmap.find(instance_id);
+                                    if(iter != instanceIDmap.end())
+                                    {
+                                        auto effecterName_m = iter->second ;
+                                        instanceIDmap.erase(iter);
+                                        if(debugP)
+                                            fprintf(stderr,"%s: erase instance ID:%d for reusing in sensor_reading\n",effecterName_m.c_str(),instance_id);
+                                    }
+
+                                    instanceIDmap.insert(pair<uint8_t, string>(instance_id, effecter->effecterName));
+
+                                    if(instance_id_g>0x1F)
+                                        instance_id_g=0;
+                                    mutex_instanceID.unlock();
+                                    //Get instanceID for PLDM msg--End
+
+                                    std::vector<uint8_t> requestMsg(sizeof(pldm_msg_hdr) + 2);
+                                    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+                                    auto rc = encode_get_numeric_effecter_value_req( instance_id, effecter->effecterId, request);
+
+                                    if (rc != PLDM_SUCCESS)
+                                    {
+                                        std::cerr << "Failed to encode request message for state effect reading" << " rc = " << rc << "\n";
+                                        return;
+                                    }
+                                    requestMsg.insert(requestMsg.begin(), MCTP_MSG_TYPE_PLDM);
+                                    auto method = systemBus->new_method_call("xyz.openbmc_project.MCTP-smbus", "/xyz/openbmc_project/mctp",
+                                                                      "xyz.openbmc_project.MCTP.Base", "SendMctpMessagePayload");
+                                    method.append(dstEid, msgTag, true, requestMsg);
+                                    systemBus->call_noreply(method);
+                                    fprintf(stderr,"Send Get Numeric Effecter Value request after getting a set response\n");
+                                    //Resend GetNumericEffecterValue--End
+                                }
+                            }
+                            else if( resphdr->command == PLDM_GET_NUMERIC_EFFECTER_VALUE )
+                            {
+                                uint8_t reteffecter_dataSize;
+                                uint8_t reteffecter_operState;
+                                uint8_t retpendingValue[4]={0};
+                                uint8_t retpresentValue[4]={0};
+                                uint32_t pendingValue;
+                                uint32_t presentValue;
+
+                                if(parseGetNumericEffecterResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1,
+                                    &reteffecter_dataSize, &reteffecter_operState, retpendingValue, retpresentValue)<0)
+                                {
+                                    fprintf(stderr,"%s: Parse Ge tNumeric Effecter Value Response Fail\n",effecter->effecterName.c_str());
+                                    return;
+                                }
+                                else
+                                {
+                                    fprintf(stderr,"Parse response of GetNumericEffecter value successfully [%s]\n",effecter->effecterName.c_str());
+                                    pendingValue = *(reinterpret_cast<uint32_t*>(retpendingValue));
+                                    presentValue = *(reinterpret_cast<uint32_t*>(retpresentValue));
+
+                                    if(debugP)
+                                    {
+                                        fprintf(stderr,"    reteffecter_dataSize:%x\n",reteffecter_dataSize);
+                                        fprintf(stderr,"    sensor_op_state:%x\n", reteffecter_operState);
+                                        fprintf(stderr,"    pendingValue:%d\n", pendingValue);
+                                        fprintf(stderr,"    presentValue:%d\n", presentValue);
+                                    }
+
+                                    effecter->effecterInterface->set_property("effecterOperationalState", reteffecter_operState);
+                                    effecter->effecterInterface->set_property("pendingValue", pendingValue);
+                                    effecter->effecterInterface->set_property("presentValue", presentValue);
+                                    return;
+                                }
+                            }
+                        }
+                        /* Numeric Sensor
+                         *    Numeric Sensor commands
+                         *    PLDM_SET_NUMERIC_SENSOR_ENABLE = 0x10,
+                         *    PLDM_GET_SENSOR_READING = 0x11,
+                         *    PLDM_GET_SENSOR_THRESHOLD = 0x12,
+                         *    PLDM_SET_SENSOR_THRESHOLD = 0x13,
+                         *    PLDM_GET_SENSOR_HYSTERESIS = 0x15,
+                         *    PLDM_SET_SENSOR_HYSTERESIS = 0x16,
+                         */
+                        else if( resphdr->command>=PLDM_SET_NUMERIC_SENSOR_ENABLE && resphdr->command<=PLDM_SET_SENSOR_HYSTERESIS )
+                        {
+                            auto& sensor = sensors[sensorName];
+                            if(!sensor)
+                            {
+                                fprintf(stderr,"got NUMERIC_SENSOR Response, but NUMERIC_SENSOR is not ready\n");
+                                return;
+                            }
+                            if(debugP)
+                                fprintf(stderr,"%s: Resp instance_id:%x sensor->cmd:%d\n",sensor->sensorName.c_str(),instance_id,sensor->cmd);
+                            if(sensor->cmd == GetSensorReading)
+                            {
+                                auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+                                if ( resphdr->command == PLDM_GET_SENSOR_READING )
+                                {
+                                    double PRESENT_val;
+                                    if(parseSensorReadingResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &PRESENT_val)<0)
+                                    {
+                                        fprintf(stderr,"%s: Parse SensorReading Response Fail\n",sensor->sensorName.c_str());
+                                        return;
+                                    }
+                                    PRESENT_val = PRESENT_val*sensor->sensorFactor;
+                                    sensor->updateValue(PRESENT_val);
+                                }
+                            }
+                            else if(sensor->cmd == SetNumericSensorEnable)
+                            {
+                                fprintf(stderr,"Response is SetNumericSensorEnable\n");
+                                if(parseSetNumericSensorEnableResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                    fprintf(stderr,"%s: Parse SetNumericSensorEnable Response Fail\n",sensor->sensorName.c_str());
+                                else
+                                    sensor->cmd = SetSensorThresholds;
                                 sensor->init();
+                            }
+                            else if(sensor->cmd == SetSensorThresholds)
+                            {
+                                if(parseSetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                    fprintf(stderr,"%s: Parse SetSensorThresholds Response Fail\n",sensor->sensorName.c_str());
+                                else
+                                {
+                                    sensor->cmd = GetSensorThresholds;
+                                    fprintf(stderr,"%s: SetSensorThresholds successfully\n",sensor->sensorName.c_str());
+                                }
+                                sensor->init();
+                            }
+                            else if(sensor->cmd == GetSensorThresholds)
+                            {
+                               int THRESHOLDs_val[6];
+                               parseGetThresholdResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, THRESHOLDs_val );
+
+                                for(int i=0 ; i<6 ; i++)
+                                    if(sensor->THRESHOLDs_val_sensor[i] != THRESHOLDs_val[i])
+                                    {
+                                       fprintf(stderr,"%s: Compare sensor threshold fail\n",sensor->sensorName.c_str());
+                                       sensor->init();
+                                       return;
+                                    }
+                                fprintf(stderr,"%s: Compare sensor threshold successfully, and then SetSensorHysteresis\n",sensor->sensorName.c_str());
+                                sensor->cmd = SetSensorHysteresis;
+                                sensor->init();
+                            }
+                            else if(sensor->cmd == SetSensorHysteresis)
+                            {
+                                fprintf(stderr,"%s: Response of SetSensorHysteresis\n",sensor->sensorName.c_str());
+                                if(parseSetSensorHysteresisResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                    fprintf(stderr,"%s: Parse SetSensorHysteresis Response Fail\n",sensor->sensorName.c_str());
+                                else
+                                {
+                                    fprintf(stderr,"%s: SetSensorHysteresis successfully\n",sensor->sensorName.c_str());
+                                    sensor->cmd = GetSensorHysteresis;
+                                }
+                                sensor->init();
+                            }
+                           else if(sensor->cmd == GetSensorHysteresis)
+                           {
+                               fprintf(stderr,"%s: Response of GetSensorHysteresis\n",sensor->sensorName.c_str());
+                               int Hysteresis_val;
+                               parseGetSensorHysteresisResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, &Hysteresis_val );
+                               fprintf(stderr,"%s: Hysteresis_val:%d\n",sensorName.c_str(),Hysteresis_val);
+                                if(sensor->hysteresis != Hysteresis_val)
+                                {
+                                    fprintf(stderr,"%s: Compare sensor hysteresis fail\n",sensor->sensorName.c_str());
+                                    sensor->init();
+                                    return;
+                                }
+
+                               sensor->cmd = GetSensorReading;
+                               fprintf(stderr,"%s: GetSensorHysteresis successfully, Start sensor read : sensorId =%X\n",sensor->sensorName.c_str(),sensor->sensorId);
+                               sensor->sensor_read_loop();
+                           }
+                        }
+                        /* Stste Sensor
+                         *    State Sensor commands
+                         *    PLDM_SET_STATE_SENSOR_ENABLE = 0x20,
+                         *    PLDM_GET_STATE_SENSOR_READINGS = 0x21,
+                         */
+                        else if( resphdr->command>=PLDM_SET_STATE_SENSOR_ENABLE && resphdr->command<=PLDM_GET_STATE_SENSOR_READINGS )
+                        {
+                            auto& sensor = state_sensors[sensorName];
+                            if(!sensor)
+                            {
+                                fprintf(stderr,"got STATE_SENSOR Response, but STATE_SENSOR is not ready\n");
+                                return;
+                            }
+                            if(debugP)
+                                fprintf(stderr,"%s: Resp instance_id:%x\n",sensor->sensorName.c_str(),instance_id);
+                            if(sensor->cmd == GetStateSensorReading)
+                            {
+                                auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+                                if ( resphdr->command == PLDM_GET_STATE_SENSOR_READINGS )
+                                {
+                                    double PRESENT_val;
+
+                                    uint8_t retcomp_sensorCnt=1;
+                                    get_sensor_state_field retstateField[8];
+                                    if(parseStateSensorReadingResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1, retcomp_sensorCnt, retstateField)<0)
+                                    {
+                                        uint8_t CC = 0x1;
+                                        fprintf(stderr,"%s: Parse sensorStateReading Response Fail\n",sensor->sensorName.c_str());
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        fprintf(stderr,"Parse response of Get state sensor State Response Successfully [%s]\n", sensor->sensorName.c_str());
+                                        for(int i=0; i<retcomp_sensorCnt; i++)
+                                        {
+                                            sensor->stateSensorInterface->set_property("sensorOperationalState", retstateField[i].sensor_op_state);
+                                            sensor->stateSensorInterface->set_property("present_state", retstateField[i].present_state);
+                                            sensor->stateSensorInterface->set_property("previous_state", retstateField[i].previous_state);
+                                            sensor->stateSensorInterface->set_property("event_state", retstateField[i].event_state);
+
+                                        if(debugP)
+                                        {
+                                                fprintf(stderr,"%d:sensor_op_state:%x\n",i,retstateField[i].sensor_op_state);
+                                                fprintf(stderr,"%d:present_state:%x\n",i,retstateField[i].present_state);
+                                                fprintf(stderr,"%d:previous_state:%x\n",i,retstateField[i].previous_state);
+                                                fprintf(stderr,"%d:event_state:%x\n",i,retstateField[i].event_state);
+                                        }
+
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            else if(sensor->cmd == SetStateSensorEnable)
+                            {
+                                if(parseSetStateSensorEnableResponseMsg(responsePtr, responseMsg.size() - sizeof(pldm_msg_hdr) - 1)<0)
+                                {
+                                    fprintf(stderr,"%s: Parse SetStateSensorEnable Response Fail\n",sensor->sensorName.c_str());
+                                    //sensor->init();
+                                    return;
+                                }
+                                else
+                                    sensor->cmd = GetStateSensorReading;
+
+                                fprintf(stderr,"Parse SetStateSensorEnable successfully, Start state_sensor_read_loop : sensorId =%X\n",sensor->sensorName.c_str(),sensor->sensorId);
+                                sensor->state_sensor_read_loop();
                                 return;
                             }
 
-                           sensor->cmd = GetSensorReading;
-                           fprintf(stderr,"%s: GetSensorHysteresis successfully, Start sensor read : sensorId =%X\n",sensor->sensorName.c_str(),sensor->sensorId);
-                           sensor->sensor_read_loop();
-                       }
+                        }
+                        else
+                            fprintf(stderr,"Got non-supported Response CMD:%x in OPER_SENSORS state\n",resphdr->command);
                         return;
                     }
                 }

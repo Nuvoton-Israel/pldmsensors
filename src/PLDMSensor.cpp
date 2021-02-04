@@ -26,6 +26,46 @@
 
 #include <exception>
 
+int parseStateSensorReadingResponseMsg(pldm_msg* responsePtr, size_t payloadLength, uint8_t retcomp_sensorCnt, get_sensor_state_field *retstateField)
+{
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+    if ( resphdr->command == PLDM_GET_STATE_SENSOR_READINGS)
+    {
+        // Response Header:3bytes
+        //    Byte1:Rq(7),D(6),Instance_ID(0-4)
+        //    Byte2:Hdr Version(6-7),PLDM Type(0-5) 0x2:Platform_monitoring_and control
+        //    Byte3:PLDM Command Code 0x11:GetSensorReading ; 0x12:GetSensorThresholds
+        // payload::
+        //    completionCode: enum8
+        //    sensorDataSize:enum8
+        //    sensorOperationState:enum8
+        //    sensorEventMessageEnable:enum8
+        //    presentState:enum8
+        //    previouState:enum8
+        //    eventState:enum8
+        //    presentReading:unit8/sint8/uint16/sint16/uint32/sint32
+        //    00 01  00 02 11  00 01 00 02 0a 07 0a 74
+        uint8_t retcompletionCode;
+
+        auto rc = decode_get_state_sensor_readings_resp(
+            responsePtr, payloadLength, &retcompletionCode,
+            &retcomp_sensorCnt, retstateField);
+
+        if (rc != PLDM_SUCCESS || retcompletionCode != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: "
+                    << "rc=" << rc << ",retcompletionCode=" << static_cast<int>(retcompletionCode) << "\n";
+            return -1;
+        }
+        fprintf(stderr,"PLDM_GET_STATE_SENSOR_READINGS Success\n");
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_GET_STATE_SENSOR_READINGS(%02x),(%x)\n", PLDM_GET_STATE_SENSOR_READINGS,resphdr->command);
+
+    return -1;
+}
+
 int parseSensorReadingResponseMsg(pldm_msg* responsePtr, size_t payloadLength, double *PRESENT_val)
 {
     auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
@@ -93,11 +133,198 @@ int parseSensorReadingResponseMsg(pldm_msg* responsePtr, size_t payloadLength, d
 
     }
     else
-        fprintf(stderr,"Response command is not PLDM_GET_SENSOR_READING(%02x),(%x)\n", PLDM_GET_SENSOR_READING, resphdr->command);
+        fprintf(stderr,"Response command is not PLDM_GET_SENSOR_READING(%02x),PLDM_SET_STATE_EFFECTER_STATES(%02x),(%x)\n", PLDM_GET_SENSOR_READING, PLDM_SET_STATE_EFFECTER_STATES,resphdr->command);
+
+    return -1;
+}
+/*Effecter--Start*/
+int parseSetEffecterStateResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
+{
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+    if( resphdr->command == PLDM_SET_STATE_EFFECTER_STATES)
+    {
+        printf("PLDM_SET_STATE_EFFECTER_STATES Resp\n");
+        // Response Header:3bytes
+        //    Byte1:Rq(7),D(6),Instance_ID(0-4)
+        //    Byte2:Hdr Version(6-7),PLDM Type(0-5) 0x2:Platform_monitoring_and control
+        //    Byte3:PLDM Command Code 0x11:GetSensorReading ; 0x12:GetSensorThresholds
+        // payload::
+        //    completionCode: enum8
+        //    setRequest:enum8
+        //    effecterState:enum8
+
+        uint8_t retcompletionCode;
+
+        auto rc = decode_set_state_effecter_states_resp(
+            responsePtr, payloadLength, &retcompletionCode);
+
+        if (rc != PLDM_SUCCESS || retcompletionCode != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: "
+                    << "rc=" << rc << ",retcompletionCode=" << static_cast<int>(retcompletionCode) << "\n";
+            return -1;
+        }
+        fprintf(stderr,"PLDM_SET_STATE_EFFECTER_STATES Success\n");
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_SET_STATE_EFFECTER_STATES(%02x),(%x)\n", PLDM_SET_STATE_EFFECTER_STATES,resphdr->command);
 
     return -1;
 }
 
+int parseGetEffecterStateResponseMsg(pldm_msg* responsePtr, size_t payloadLength, uint8_t retcomp_sensorCnt, get_sensor_state_field *retstateField)
+{
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+    if( resphdr->command == PLDM_GET_STATE_EFFECTER_STATES)
+    {
+        fprintf(stderr,"PLDM_GET_STATE_EFFECTER_STATES Resp\n");
+        // Response Header:3bytes
+        //    Byte1:Rq(7),D(6),Instance_ID(0-4)
+        //    Byte2:Hdr Version(6-7),PLDM Type(0-5) 0x2:Platform_monitoring_and control
+        //    Byte3:PLDM Command Code 0x11:GetSensorReading ; 0x12:GetSensorThresholds
+        // payload::
+        //    completionCode: enum8
+        //    compositeEffecterCount: uint8
+        //    stateFields:(3*enum8)
+        //        effecterOperationalState:enum8
+        //        pendingState: enum8
+        //        presentState: enum8
+
+        uint8_t retcompletionCode;
+
+        auto rc = decode_get_state_sensor_readings_resp(
+            responsePtr, payloadLength, &retcompletionCode,
+            &retcomp_sensorCnt, retstateField);
+
+        if (rc != PLDM_SUCCESS || retcompletionCode != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: "
+                    << "rc=" << rc << ",retcompletionCode=" << static_cast<int>(retcompletionCode) << "\n";
+            return -1;
+        }
+        fprintf(stderr,"PLDM_GET_STATE_EFFECTER_STATES Success\n");
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_GET_STATE_EFFECTER_STATES(%02x),(%x)\n", PLDM_GET_STATE_EFFECTER_STATES,resphdr->command);
+
+    return -1;
+}
+
+int parseSetNumericEffecterResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
+{
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+    if( resphdr->command == PLDM_SET_NUMERIC_EFFECTER_VALUE)
+    {
+        printf("PLDM_SET_NUMERIC_EFFECTER_VALUE Resp\n");
+        // Response Header:3bytes
+        //    Byte1:Rq(7),D(6),Instance_ID(0-4)
+        //    Byte2:Hdr Version(6-7),PLDM Type(0-5) 0x2:Platform_monitoring_and control
+        //    Byte3:PLDM Command Code 0x11:GetSensorReading ; 0x12:GetSensorThresholds
+        // payload::
+        //    completionCode: enum8
+        //    setRequest:enum8
+        //    effecterState:enum8
+
+        uint8_t retcompletionCode;
+
+        auto rc = decode_set_numeric_effecter_value_resp(
+            responsePtr, payloadLength, &retcompletionCode);
+
+        if (rc != PLDM_SUCCESS || retcompletionCode != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: "
+                    << "rc=" << rc << ",retcompletionCode=" << static_cast<int>(retcompletionCode) << "\n";
+            return -1;
+        }
+        fprintf(stderr,"PLDM_SET_NUMERIC_EFFECTER_VALUE Success\n");
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_SET_NUMERIC_EFFECTER_VALUE(%02x),(%x)\n", PLDM_SET_NUMERIC_EFFECTER_VALUE,resphdr->command);
+
+    return -1;
+}
+
+int parseGetNumericEffecterResponseMsg(pldm_msg* responsePtr, size_t payloadLength,
+        uint8_t *reteffecter_dataSize, uint8_t *reteffecter_operState, uint8_t *retpendingValue, uint8_t *retpresentValue)
+{
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+    if( resphdr->command == PLDM_GET_NUMERIC_EFFECTER_VALUE)
+    {
+        fprintf(stderr,"PLDM_GET_Numeric_EFFECTER_Value Resp\n");
+        // Response Header:3bytes
+        //    Byte1:Rq(7),D(6),Instance_ID(0-4)
+        //    Byte2:Hdr Version(6-7),PLDM Type(0-5) 0x2:Platform_monitoring_and control
+        //    Byte3:PLDM Command Code 0x11:GetSensorReading ; 0x12:GetSensorThresholds
+        // payload::
+        //    completionCode: enum8
+        //    compositeEffecterCount: uint8
+        //    stateFields:(3*enum8)
+        //        effecterOperationalState:enum8
+        //        pendingState: enum8
+        //        presentState: enum8
+
+        uint8_t retcompletionCode;
+
+        auto rc = decode_get_numeric_effecter_value_resp(
+            responsePtr, payloadLength, &retcompletionCode,
+            reteffecter_dataSize, reteffecter_operState, retpendingValue,
+            retpresentValue);
+
+        if (rc != PLDM_SUCCESS || retcompletionCode != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: "
+                    << "rc=" << rc << ",retcompletionCode=" << static_cast<int>(retcompletionCode) << "\n";
+            return -1;
+        }
+        fprintf(stderr,"PLDM_GET_NUMERIC_EFFECTER_VALUE Success\n");
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_GET_NUMERIC_EFFECTER_VALUE(%02x),(%x)\n", PLDM_GET_NUMERIC_EFFECTER_VALUE,resphdr->command);
+
+    return -1;
+}
+
+/*Create Request Functions -- Start*/
+
+
+
+std::pair<int, std::vector<uint8_t>> PLDMStateSensor::createGetStateSensorReadingRequestMsg(uint16_t sensorId, bitfield8_t rearmEventState)
+{
+    std::vector<uint8_t> requestMsg(
+        sizeof(pldm_msg_hdr) + 4);
+
+    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+    auto rc = encode_get_state_sensor_readings_req(instance_id, sensorId, rearmEventState, 0x0,
+                                                   request);
+
+    return {rc, requestMsg};
+}
+
+
+std::pair<int, std::vector<uint8_t>> PLDMStateSensor::createSetStateSensorEnableRequestMsg(uint16_t sensorId, uint8_t sensorOperationalState, uint8_t sensorEventMessageEnable)
+{
+    uint8_t compositeSensorCount = 1;
+    state_sensor_op_field opField1 = {sensorOperationalState,
+                                      sensorEventMessageEnable};
+    std::vector<state_sensor_op_field> opFields = {opField1};
+    std::vector<uint8_t> requestMsg(
+        sizeof(pldm_msg_hdr) + sizeof(pldm_set_state_sensor_enable_req) -
+        sizeof(state_sensor_op_field) +
+        (sizeof(state_sensor_op_field) * compositeSensorCount));
+
+    auto request = reinterpret_cast<pldm_msg*>(requestMsg.data());
+    auto rc = encode_set_state_sensor_enable_req(instance_id, sensorId,
+                                                  compositeSensorCount, opFields.data(),
+                                                  request);
+
+    return {rc, requestMsg};
+}
+
+////////////
 std::pair<int, std::vector<uint8_t>> PLDMSensor::createGetSensorReadingRequestMsg(uint16_t sensorId, bool8_t rearmEventState)
 {
     std::vector<uint8_t> requestMsg(
@@ -108,26 +335,6 @@ std::pair<int, std::vector<uint8_t>> PLDMSensor::createGetSensorReadingRequestMs
                                                request);
 
     return {rc, requestMsg};
-}
-
-/*
- * print the input buffer if pldm verbosity is enabled.
- *
- */
-void printBuffer(const std::vector<uint8_t>& buffer, bool pldmVerbose)
-{
-    if (pldmVerbose && !buffer.empty())
-    {
-        std::ostringstream tempStream;
-        std::string str;
-        for (int byte : buffer)
-        {
-            std::stringstream ss;
-            ss << std::setfill('0') << std::setw(2) << std::hex << byte;
-            str += ss.str()+" ";
-        }
-        std::cout <<"printBuffer:"<<str.length()<<":"<< str <<"\n";
-    }
 }
 
 std::pair<int, std::vector<uint8_t>> PLDMSensor::createSetSensorThresholdRequestMsg(uint16_t sensorId, uint8_t sensorDataSize, uint32_t THRESHOLDs_val[])
@@ -416,6 +623,35 @@ int parseSetThresholdResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
     return -1;
 }
 
+
+int parseSetStateSensorEnableResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
+{
+    uint8_t cc = 0;
+    uint8_t sensorOperationalState;
+    uint8_t eventMessageEnable;
+    auto resphdr = reinterpret_cast<const pldm_msg_hdr*>(responsePtr);
+
+    if(resphdr->command == PLDM_SET_STATE_SENSOR_ENABLE)
+    {
+        auto rc = decode_set_state_sensor_enable_resp(responsePtr, payloadLength, &cc, &sensorOperationalState, &eventMessageEnable);
+
+        if (rc != PLDM_SUCCESS || cc != PLDM_SUCCESS)
+        {
+            std::cerr << "Response Message Error: (set_numeric_sensor_enable)"
+                    << "rc=" << rc << ",cc=" << static_cast<int>(cc) << "\n";
+            return -1;
+        }
+        fprintf(stderr,"sensorOperationalState:%x\n",sensorOperationalState);
+        fprintf(stderr,"eventMessageEnable:%x\n",eventMessageEnable);
+        return 0;
+    }
+    else
+        fprintf(stderr,"Response command is not PLDM_SET_STATE_SENSOR_ENABLE(%02X), is (%02x)\n", PLDM_SET_STATE_SENSOR_ENABLE, resphdr->command);
+
+    return -1;
+}
+
+
 int parseSetNumericSensorEnableResponseMsg(pldm_msg* responsePtr, size_t payloadLength)
 {
     uint8_t cc = 0;
@@ -474,6 +710,50 @@ int matchPldmTypes(std::vector<bitfield8_t>& types, pldm_supported_types pldmTyp
     }
     return 0;
 
+}
+
+std::string getService(sdbusplus::bus::bus& bus, std::string path,
+                       std::string interface)
+{
+    auto mapper = bus.new_method_call(MAPPER_BUSNAME, MAPPER_PATH,
+                                      MAPPER_INTERFACE, "GetObject");
+
+    mapper.append(path, std::vector<std::string>({interface}));
+
+    std::map<std::string, std::vector<std::string>> mapperResponse;
+
+    auto mapperResponseMsg = bus.call(mapper);
+
+    mapperResponseMsg.read(mapperResponse);
+    if (mapperResponse.empty())
+    {
+        fprintf(stderr,"Error reading mapper response PATH=%s INTERFACE=%s", path.c_str(), interface.c_str());
+        throw std::runtime_error("Error reading mapper response");
+    }
+
+    return mapperResponse.begin()->first;
+}
+
+std::string getProperty(sdbusplus::bus::bus& bus, std::string path,
+                        std::string interface, std::string propertyName)
+{
+    std::variant<std::string> property;
+    std::string service = getService(bus, path, interface);
+
+    auto method = bus.new_method_call(service.c_str(), path.c_str(),
+                                      PROPERTY_INTERFACE, "Get");
+
+    method.append(interface, propertyName);
+    auto reply = bus.call(method);
+    reply.read(property);
+
+    if (std::get<std::string>(property).empty())
+    {
+        fprintf(stderr,"Error reading property response %s\n", propertyName.c_str());
+        throw std::runtime_error("Error reading property response");
+    }
+
+    return std::get<std::string>(property);
 }
 
 void printPldmTypes(std::vector<bitfield8_t>& types)
@@ -742,6 +1022,81 @@ int readArrayFromMessage(const std::string& typeCode,
     return 0;
 }
 
+int readStructFromMessage(const std::string& typeCode,
+                                 sdbusplus::message::message& m,
+                                 nlohmann::json& data)
+{
+    if (typeCode.size() < 3)
+    {
+        fprintf(stderr,"Type code %s too small for a struct\n", typeCode.c_str());
+        return -1;
+    }
+
+    std::string containedTypes = typeCode.substr(1, typeCode.size() - 2);
+    std::vector<std::string> types = dbusArgSplit(containedTypes);
+
+    int r = sd_bus_message_enter_container(m.get(), SD_BUS_TYPE_STRUCT,
+                                           containedTypes.c_str());
+    if (r < 0)
+    {
+        fprintf(stderr,"sd_bus_message_enter_container failed with rc %d\n", r);
+        return r;
+    }
+
+    for (const std::string& type : types)
+    {
+        data.push_back(nlohmann::json());
+        r = convertDBusToJSON(type, m, data.back());
+        if (r < 0)
+        {
+            return r;
+        }
+    }
+
+    r = sd_bus_message_exit_container(m.get());
+    if (r < 0)
+    {
+        fprintf(stderr,"sd_bus_message_exit_container failed\n");
+        return r;
+    }
+    return 0;
+}
+
+int readVariantFromMessage(sdbusplus::message::message& m,
+                                  nlohmann::json& data)
+{
+    const char* containerType;
+    int r = sd_bus_message_peek_type(m.get(), nullptr, &containerType);
+    if (r < 0)
+    {
+        fprintf(stderr,"sd_bus_message_peek_type failed\n");
+        return r;
+    }
+
+    r = sd_bus_message_enter_container(m.get(), SD_BUS_TYPE_VARIANT,
+                                       containerType);
+    if (r < 0)
+    {
+        fprintf(stderr,"sd_bus_message_enter_container failed with rc %d\n", r);
+        return r;
+    }
+
+    r = convertDBusToJSON(containerType, m, data);
+    if (r < 0)
+    {
+        return r;
+    }
+
+    r = sd_bus_message_exit_container(m.get());
+    if (r < 0)
+    {
+        fprintf(stderr,"sd_bus_message_enter_container failed\n");
+        return r;
+    }
+
+    return 0;
+}
+
 int convertDBusToJSON(const std::string& returnType,
                       sdbusplus::message::message& m, nlohmann::json& response)
 {
@@ -762,6 +1117,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<char*>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"s: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -770,6 +1126,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<char*>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"g: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -778,6 +1135,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<char*>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"o: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -786,6 +1144,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<int>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"b: readMessageItem error:%d\n",r);
                 return r;
             }
 
@@ -796,6 +1155,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<uint32_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"u: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -804,6 +1164,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<int32_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"i: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -812,6 +1173,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<int64_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"x: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -820,6 +1182,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<uint64_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"t: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -828,6 +1191,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<int16_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"n: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -836,6 +1200,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<uint16_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"q: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -844,6 +1209,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<uint8_t>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"y: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -852,6 +1218,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<double>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"d: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -860,6 +1227,7 @@ int convertDBusToJSON(const std::string& returnType,
             r = readMessageItem<int>(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"h: readMessageItem error:%d\n",r);
                 return r;
             }
         }
@@ -868,15 +1236,17 @@ int convertDBusToJSON(const std::string& returnType,
             r = readArrayFromMessage(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"a: readArrayFromMessage error:%d\n",r);
                 return r;
             }
-        }/*
+        }
         else if (boost::starts_with(typeCode, "(") &&
                  boost::ends_with(typeCode, ")"))
         {
             r = readStructFromMessage(typeCode, m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"(): readStructFromMessage error:%d\n",r);
                 return r;
             }
         }
@@ -885,9 +1255,10 @@ int convertDBusToJSON(const std::string& returnType,
             r = readVariantFromMessage(m, *thisElement);
             if (r < 0)
             {
+				fprintf(stderr,"v: readVariantFromMessage error:%d\n",r);
                 return r;
             }
-        }*/
+        }
         else
         {
             fprintf(stderr, "Invalid D-Bus signature type %s\n",typeCode.c_str());

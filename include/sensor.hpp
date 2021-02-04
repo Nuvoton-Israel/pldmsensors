@@ -19,6 +19,37 @@ constexpr const char* operationalInterfaceName =
     "xyz.openbmc_project.State.Decorator.OperationalStatus";
 constexpr const size_t errorThreshold = 5;
 
+
+constexpr const char* sensorStateInterface = "xyz.openbmc_project.Sensor.State";
+struct StateSensor
+{
+    StateSensor(const std::string& name,
+           std::shared_ptr<sdbusplus::asio::connection>& conn) :
+        name(std::regex_replace(name, std::regex("[^a-zA-Z0-9_/]+"), "_")),
+        dbusConnection(conn)
+    {}
+    virtual ~StateSensor() = default;
+    std::string name;
+    bool overriddenState = false;
+    bool internalSet = false;
+    std::shared_ptr<sdbusplus::asio::dbus_interface> stateSensorInterface;
+    uint8_t state = std::numeric_limits<uint8_t>::quiet_NaN();
+
+    std::shared_ptr<sdbusplus::asio::connection> dbusConnection;
+
+    void
+        setInitialProperties(std::shared_ptr<sdbusplus::asio::connection>& conn,
+                             const std::string label = std::string(),
+                             size_t thresholdSize = 0)
+    {
+        if (!stateSensorInterface->initialize())
+        {
+            std::cerr << "error initializing StateSensor interface\n";
+        }
+    }
+
+};
+
 struct Sensor
 {
     Sensor(const std::string& name,
