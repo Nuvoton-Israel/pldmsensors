@@ -96,10 +96,13 @@ std::unique_ptr<boost::asio::deadline_timer> pldmdeviceTimer;
 auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
 
 map<uint8_t, string> instanceIDmap;
-const std::string& sensorPathPrefix = "/xyz/openbmc_project/sensors/";
-const std::string& effecterPathPrefix = "/xyz/openbmc_project/effecters/";
-const std::string& numericeffecterPathPrefix = "/xyz/openbmc_project/numericeffecters/";
+const std::string& numericsensorPathPrefix = "/xyz/openbmc_project/numericsensors/";
 const std::string& statesensorPathPrefix = "/xyz/openbmc_project/statesensors/";
+
+const std::string& numericeffecterPathPrefix = "/xyz/openbmc_project/numericeffecters/";
+const std::string& stateeffecterPathPrefix = "/xyz/openbmc_project/stateeffecters/";
+
+
 const std::string& sensorConfiguration="/xyz/openbmc_project/inventory/system/chassis";
 
 /*Effecter--Start*/
@@ -119,7 +122,7 @@ PLDMEffecter::PLDMEffecter(std::shared_ptr<sdbusplus::asio::connection>& conn,
     objectServer(objectServer), dbusConnection(conn),
     effecterName(effecterName), effecterTypeName(effecterTypeName)
 {
-    dbusPath = effecterPathPrefix + effecterTypeName + "/" + name;
+    dbusPath = stateeffecterPathPrefix + effecterTypeName + "/" + name;
 
     effecterInterface = objectServer.add_interface(dbusPath, effecterStateInterface);
     effecterInterface->register_property("effecterId", effecterId);
@@ -939,7 +942,7 @@ PLDMSensor::PLDMSensor(std::shared_ptr<sdbusplus::asio::connection>& conn,
     objectServer(objectServer), dbusConnection(conn), waitTimer(io),
     sensorName(sensorName), sensorTypeName(sensorTypeName)
 {
-    std::string dbusPath = sensorPathPrefix + sensorTypeName + "/" + name;
+    std::string dbusPath = numericsensorPathPrefix + sensorTypeName + "/" + name;
     sensorInterface = objectServer.add_interface(dbusPath, sensorValueInterface);
 
     std::string UnitPath = "xyz.openbmc_project.Sensor.Value.Unit." + sensorUnit;
